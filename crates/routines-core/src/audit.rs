@@ -90,12 +90,7 @@ impl AuditDb {
     }
 
     /// Finalize a run record with end status and timestamp.
-    pub fn finalize_run(
-        &self,
-        run_id: &str,
-        result: &RunResult,
-        ended_at: &str,
-    ) -> Result<()> {
+    pub fn finalize_run(&self, run_id: &str, result: &RunResult, ended_at: &str) -> Result<()> {
         let status = match result.status {
             RunStatus::Success => "SUCCESS",
             RunStatus::Failed => "FAILED",

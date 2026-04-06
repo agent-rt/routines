@@ -19,7 +19,11 @@ fn dirs_home() -> PathBuf {
 }
 
 #[derive(Parser)]
-#[command(name = "routines", version, about = "Deterministic workflow engine for AI agents")]
+#[command(
+    name = "routines",
+    version,
+    about = "Deterministic workflow engine for AI agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -66,9 +70,9 @@ fn cmd_serve() -> routines_core::error::Result<()> {
         let server = RoutinesMcpServer::new();
         let service = rmcp::ServiceExt::serve(server, rmcp::transport::stdio())
             .await
-            .map_err(|e| routines_core::error::RoutineError::Io(
-                std::io::Error::other(e.to_string()),
-            ))?;
+            .map_err(|e| {
+                routines_core::error::RoutineError::Io(std::io::Error::other(e.to_string()))
+            })?;
         service.waiting().await.map_err(|e| {
             routines_core::error::RoutineError::Io(std::io::Error::other(e.to_string()))
         })?;
@@ -177,7 +181,11 @@ fn cmd_log(run_id: &str) -> routines_core::error::Result<()> {
 
     // Steps
     for (i, step) in log.steps.iter().enumerate() {
-        let icon = if step.status == "SUCCESS" { "OK" } else { "FAIL" };
+        let icon = if step.status == "SUCCESS" {
+            "OK"
+        } else {
+            "FAIL"
+        };
         println!(
             "\n[{icon}] Step {num}: {id}  (exit={exit}, {ms}ms)",
             num = i + 1,

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
-use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -119,33 +119,36 @@ impl RoutinesMcpServer {
         let mut routines = Vec::new();
 
         if hub_dir.exists() {
-            let entries =
-                std::fs::read_dir(&hub_dir).map_err(|e| err_internal(format!("Failed to read hub: {e}")))?;
+            let entries = std::fs::read_dir(&hub_dir)
+                .map_err(|e| err_internal(format!("Failed to read hub: {e}")))?;
 
             for entry in entries.flatten() {
                 let path: PathBuf = entry.path();
-                if path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml")
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext == "yml" || ext == "yaml")
                     && let Ok(routine) = Routine::from_file(&path)
                 {
-                        routines.push(RoutineInfo {
-                            name: routine.name,
-                            description: routine.description,
-                            inputs_schema: routine
-                                .inputs
-                                .into_iter()
-                                .map(|i| InputInfo {
-                                    name: i.name,
-                                    required: i.required,
-                                    default: i.default,
-                                    description: i.description,
-                                })
-                                .collect(),
-                        });
+                    routines.push(RoutineInfo {
+                        name: routine.name,
+                        description: routine.description,
+                        inputs_schema: routine
+                            .inputs
+                            .into_iter()
+                            .map(|i| InputInfo {
+                                name: i.name,
+                                required: i.required,
+                                default: i.default,
+                                description: i.description,
+                            })
+                            .collect(),
+                    });
                 }
             }
         }
 
-        let json = serde_json::to_string_pretty(&routines).map_err(|e| err_internal(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(&routines).map_err(|e| err_internal(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
@@ -154,13 +157,15 @@ impl RoutinesMcpServer {
         &self,
         Parameters(params): Parameters<RunRoutineParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let yaml_path = routines_dir().join("hub").join(format!("{}.yml", params.name));
+        let yaml_path = routines_dir()
+            .join("hub")
+            .join(format!("{}.yml", params.name));
         if !yaml_path.exists() {
             return Err(err_params(format!("Routine '{}' not found", params.name)));
         }
 
-        let routine =
-            Routine::from_file(&yaml_path).map_err(|e| err_internal(format!("Parse error: {e}")))?;
+        let routine = Routine::from_file(&yaml_path)
+            .map_err(|e| err_internal(format!("Parse error: {e}")))?;
 
         let secret_map = secrets::load_secrets(&routines_dir().join(".env"));
         let db = AuditDb::open(&routines_dir().join("data.db"))
@@ -210,7 +215,8 @@ impl RoutinesMcpServer {
                 .collect(),
         };
 
-        let json = serde_json::to_string_pretty(&response).map_err(|e| err_internal(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(&response).map_err(|e| err_internal(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
@@ -236,11 +242,14 @@ impl RoutinesMcpServer {
             path: file_path.display().to_string(),
         };
 
-        let json = serde_json::to_string_pretty(&response).map_err(|e| err_internal(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(&response).map_err(|e| err_internal(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Get the complete audit log for a routine run, including all step details")]
+    #[tool(
+        description = "Get the complete audit log for a routine run, including all step details"
+    )]
     async fn get_run_log(
         &self,
         Parameters(params): Parameters<GetRunLogParams>,
@@ -254,8 +263,8 @@ impl RoutinesMcpServer {
 
         match log {
             Some(run_log) => {
-                let json =
-                    serde_json::to_string_pretty(&run_log).map_err(|e| err_internal(e.to_string()))?;
+                let json = serde_json::to_string_pretty(&run_log)
+                    .map_err(|e| err_internal(e.to_string()))?;
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             None => Err(err_params(format!("Run '{}' not found", params.run_id))),

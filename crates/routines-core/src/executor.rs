@@ -173,7 +173,11 @@ fn execute_step(step: &Step, ctx: &Context, strict_mode: bool) -> Result<StepRes
     } else {
         match output.status.code() {
             Some(code) => (StepStatus::Failed, Some(code)),
-            None => return Err(RoutineError::StepKilled { step_id: step.id.clone() }),
+            None => {
+                return Err(RoutineError::StepKilled {
+                    step_id: step.id.clone(),
+                });
+            }
         }
     };
 

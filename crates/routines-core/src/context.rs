@@ -39,10 +39,12 @@ impl Context {
         while let Some(start) = rest.find("{{") {
             result.push_str(&rest[..start]);
             let after_open = &rest[start + 2..];
-            let end = after_open.find("}}").ok_or_else(|| RoutineError::UndefinedVariable {
-                step_id: current_step_id.to_string(),
-                key: "unclosed {{ template".to_string(),
-            })?;
+            let end = after_open
+                .find("}}")
+                .ok_or_else(|| RoutineError::UndefinedVariable {
+                    step_id: current_step_id.to_string(),
+                    key: "unclosed {{ template".to_string(),
+                })?;
             let key = after_open[..end].trim();
             let value = self.lookup(key, current_step_id)?;
             result.push_str(&value);
@@ -54,30 +56,38 @@ impl Context {
 
     /// Look up a single template key like `inputs.ENV`, `secrets.KEY`, or `step_id.stdout`.
     fn lookup(&self, key: &str, current_step_id: &str) -> Result<String> {
-        let (prefix, suffix) = key.split_once('.').ok_or_else(|| RoutineError::UndefinedVariable {
-            step_id: current_step_id.to_string(),
-            key: key.to_string(),
-        })?;
+        let (prefix, suffix) =
+            key.split_once('.')
+                .ok_or_else(|| RoutineError::UndefinedVariable {
+                    step_id: current_step_id.to_string(),
+                    key: key.to_string(),
+                })?;
 
         match prefix {
-            "inputs" => self.inputs.get(suffix).cloned().ok_or_else(|| {
-                RoutineError::UndefinedVariable {
-                    step_id: current_step_id.to_string(),
-                    key: key.to_string(),
-                }
-            }),
-            "secrets" => self.secrets.get(suffix).cloned().ok_or_else(|| {
-                RoutineError::UndefinedVariable {
-                    step_id: current_step_id.to_string(),
-                    key: key.to_string(),
-                }
-            }),
+            "inputs" => {
+                self.inputs
+                    .get(suffix)
+                    .cloned()
+                    .ok_or_else(|| RoutineError::UndefinedVariable {
+                        step_id: current_step_id.to_string(),
+                        key: key.to_string(),
+                    })
+            }
+            "secrets" => {
+                self.secrets
+                    .get(suffix)
+                    .cloned()
+                    .ok_or_else(|| RoutineError::UndefinedVariable {
+                        step_id: current_step_id.to_string(),
+                        key: key.to_string(),
+                    })
+            }
             _ => {
                 // Treat prefix as a step_id
-                let output =
-                    self.step_outputs
-                        .get(prefix)
-                        .ok_or(RoutineError::StepNotExecuted(prefix.to_string()))?;
+                let output = self
+                    .step_outputs
+                    .get(prefix)
+                    .ok_or(RoutineError::StepNotExecuted(prefix.to_string()))?;
                 match suffix {
                     "stdout" => Ok(output.stdout.clone()),
                     "stderr" => Ok(output.stderr.clone()),
