@@ -35,6 +35,9 @@ pub enum RoutineError {
     #[error("MCP config error: {0}")]
     McpConfig(String),
 
+    #[error("Transform error in step '{step_id}': {message}")]
+    Transform { step_id: String, message: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

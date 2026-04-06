@@ -16,3 +16,4 @@ rmcp = { workspace = true }
 tokio = { workspace = true }
 schemars = { workspace = true }
 ureq = { workspace = true }
+indexmap = { workspace = true }

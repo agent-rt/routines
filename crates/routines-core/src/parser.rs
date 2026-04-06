@@ -142,6 +142,16 @@ pub enum StepAction {
         #[serde(default)]
         arguments: HashMap<String, serde_json::Value>,
     },
+    Transform {
+        /// Template expression that resolves to a JSON string.
+        input: String,
+        /// JSON path to select data from input. If pointing to an array, mapping applies per element.
+        #[serde(default)]
+        select: Option<String>,
+        /// Field mapping: output_key → path + filter pipeline. Uses IndexMap to preserve order.
+        #[serde(default)]
+        mapping: Option<indexmap::IndexMap<String, String>>,
+    },
 }
 
 fn default_method() -> String {
@@ -745,6 +755,110 @@ output_format: table
         .unwrap();
 
         assert_eq!(routine.output_format, OutputFormat::Table);
+    }
+
+    #[test]
+    fn parse_transform_step() {
+        let routine = Routine::from_yaml(
+            r#"
+name: transform_test
+description: test
+steps:
+  - id: extract
+    type: transform
+    input: "{{ search.stdout }}"
+    select: ".data.items"
+    mapping:
+      name: ".name"
+      price: ".price | to_int"
+"#,
+        )
+        .unwrap();
+
+        match &routine.steps[0].action {
+            StepAction::Transform {
+                input,
+                select,
+                mapping,
+            } => {
+                assert_eq!(input, "{{ search.stdout }}");
+                assert_eq!(select.as_deref(), Some(".data.items"));
+                let m = mapping.as_ref().unwrap();
+                assert_eq!(m.len(), 2);
+                assert_eq!(m["name"], ".name");
+                assert_eq!(m["price"], ".price | to_int");
+                // Verify order preserved
+                let keys: Vec<&String> = m.keys().collect();
+                assert_eq!(keys, vec!["name", "price"]);
+            }
+            other => panic!("expected Transform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_transform_no_mapping() {
+        let routine = Routine::from_yaml(
+            r#"
+name: transform_select_only
+description: test
+steps:
+  - id: extract
+    type: transform
+    input: "{{ search.stdout }}"
+    select: ".data.items"
+"#,
+        )
+        .unwrap();
+
+        match &routine.steps[0].action {
+            StepAction::Transform {
+                select, mapping, ..
+            } => {
+                assert_eq!(select.as_deref(), Some(".data.items"));
+                assert!(mapping.is_none());
+            }
+            other => panic!("expected Transform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_transform_no_select() {
+        let routine = Routine::from_yaml(
+            r#"
+name: transform_identity
+description: test
+steps:
+  - id: pass
+    type: transform
+    input: "{{ prev.stdout }}"
+"#,
+        )
+        .unwrap();
+
+        match &routine.steps[0].action {
+            StepAction::Transform {
+                select, mapping, ..
+            } => {
+                assert!(select.is_none());
+                assert!(mapping.is_none());
+            }
+            other => panic!("expected Transform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_missing_input_fails() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad
+description: test
+steps:
+  - id: no_input
+    type: transform
+    select: ".data"
+"#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

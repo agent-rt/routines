@@ -8,3 +8,4 @@ pub mod registry;
 pub mod resolve;
 pub mod secrets;
 pub mod server;
+pub mod transform;

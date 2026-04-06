@@ -174,6 +174,30 @@ Step (type: mcp):
   tool: String (required) — tool name to call on the server
   arguments: map of String→JSON (default: {}) — tool arguments, string values support templates
 
+Step (type: transform):
+  input: String (required) — template resolving to JSON string
+  select: String (optional) — JSON path to extract (e.g. '.data.items'). Array → mapping per element
+  mapping: map of String→String (optional) — output_key → path + filter pipeline
+
+  Path syntax: .field, [0], [-1], [*] (wildcard expands array, applies remaining path per element)
+
+  Filter pipeline (use | to chain):
+    Type: to_int, to_float, to_string
+    String: slice(start, end), split(sep), join(sep), replace(old, new), trim
+    Math: math(expr) — use _ for current value (e.g. math(_ / 60)), round, floor, ceil
+    Format: duration_fmt — minutes→'Xh Ym', default(value), fmt(template) — {} placeholder
+
+  Example:
+    - id: format
+      type: transform
+      input: '{{ search.stdout }}'
+      select: '.data.itemList'
+      mapping:
+        price: '.ticketPrice'
+        duration: '.totalDuration | to_int | duration_fmt'
+        flights: '.journeys[0].segments[*].marketingTransportNo | join(\"/\")'
+        dep: '.journeys[0].segments[0].depDateTime | slice(11, 16)'
+
 Template syntax:
   {{ inputs.NAME }}       — input parameter value
   {{ secrets.KEY }}       — secret from ~/.routines/.env
@@ -589,6 +613,30 @@ impl RoutinesMcpServer {
                         let _ = writeln!(out, "    arguments: {}", arg_parts.join(" "));
                     }
                 }
+                StepAction::Transform {
+                    input,
+                    select,
+                    mapping,
+                } => {
+                    let resolved_input = ctx
+                        .resolve(input, &step.id)
+                        .unwrap_or_else(|e| format!("<error: {e}>"));
+                    let preview = if resolved_input.len() > 80 {
+                        format!("{}...", &resolved_input[..80])
+                    } else {
+                        resolved_input
+                    };
+                    let _ = writeln!(out, "[{}] {}: transform", i + 1, step.id);
+                    let _ = writeln!(out, "    input: {preview}");
+                    if let Some(sel) = select {
+                        let _ = writeln!(out, "    select: {sel}");
+                    }
+                    if let Some(m) = mapping {
+                        for (k, v) in m {
+                            let _ = writeln!(out, "    {k}: {v}");
+                        }
+                    }
+                }
             }
 
             if let Some(when_expr) = &step.when {
@@ -651,6 +699,16 @@ impl RoutinesMcpServer {
                     }
                     StepAction::Mcp { server, tool, .. } => {
                         let _ = writeln!(out, "  [F{}] {}: mcp {}:{}", i + 1, step.id, server, tool);
+                    }
+                    StepAction::Transform { select, mapping, .. } => {
+                        let _ = write!(out, "  [F{}] {}: transform", i + 1, step.id);
+                        if let Some(sel) = select {
+                            let _ = write!(out, " select={sel}");
+                        }
+                        if let Some(m) = mapping {
+                            let _ = write!(out, " fields=[{}]", m.keys().cloned().collect::<Vec<_>>().join(", "));
+                        }
+                        let _ = writeln!(out);
                     }
                 }
                 if let Some(when_expr) = &step.when {

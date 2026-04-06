@@ -236,6 +236,40 @@ fn execute_step(
             },
             ctx,
         ),
+        StepAction::Transform {
+            input,
+            select,
+            mapping,
+        } => {
+            let start = std::time::Instant::now();
+            let resolved_input = ctx.resolve(input, &step.id)?;
+            let json_input: serde_json::Value = serde_json::from_str(&resolved_input)
+                .map_err(|e| RoutineError::Transform {
+                    step_id: step.id.clone(),
+                    message: format!("input is not valid JSON: {e}"),
+                })?;
+            match crate::transform::apply(&json_input, select.as_deref(), mapping.as_ref()) {
+                Ok(output) => {
+                    let stdout = serde_json::to_string(&output).unwrap_or_default();
+                    Ok(StepResult {
+                        step_id: step.id.clone(),
+                        status: StepStatus::Success,
+                        exit_code: Some(0),
+                        stdout,
+                        stderr: String::new(),
+                        execution_time_ms: start.elapsed().as_millis() as u64,
+                    })
+                }
+                Err(e) => Ok(StepResult {
+                    step_id: step.id.clone(),
+                    status: StepStatus::Failed,
+                    exit_code: Some(1),
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                }),
+            }
+        }
     }
 }
 
