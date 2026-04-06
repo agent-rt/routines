@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "routines": {
+      "command": "/Users/linguofeng/ai-workspace/routines/target/release/routines",
+      "args": ["serve"]
+    }
+  }
+}

@@ -6,6 +6,7 @@ use routines_core::audit::AuditDb;
 use routines_core::executor::{self, RunStatus, StepStatus};
 use routines_core::parser::Routine;
 use routines_core::secrets;
+use routines_core::server::RoutinesMcpServer;
 
 fn routines_dir() -> PathBuf {
     dirs_home().join(".routines")
@@ -34,6 +35,8 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         inputs: Vec<String>,
     },
+    /// Start MCP server (stdio transport)
+    Serve,
 }
 
 fn main() {
@@ -47,7 +50,24 @@ fn main() {
 fn dispatch(cli: Cli) -> routines_core::error::Result<()> {
     match cli.command {
         Commands::Run { name, inputs } => cmd_run(&name, &inputs),
+        Commands::Serve => cmd_serve(),
     }
+}
+
+fn cmd_serve() -> routines_core::error::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let server = RoutinesMcpServer::new();
+        let service = rmcp::ServiceExt::serve(server, rmcp::transport::stdio())
+            .await
+            .map_err(|e| routines_core::error::RoutineError::Io(
+                std::io::Error::other(e.to_string()),
+            ))?;
+        service.waiting().await.map_err(|e| {
+            routines_core::error::RoutineError::Io(std::io::Error::other(e.to_string()))
+        })?;
+        Ok(())
+    })
 }
 
 fn cmd_run(name: &str, raw_inputs: &[String]) -> routines_core::error::Result<()> {
