@@ -44,16 +44,16 @@ pub struct RunRoutineParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ManageRoutineParams {
-    /// Action: schema, get, create, validate, dry_run, test
+pub struct MetaParams {
+    /// Action: schema, get, create, validate, dry_run, test, history, log
     pub action: String,
-    /// Routine name (for get/create)
+    /// Routine name (for get/create/history) or run_id (for log)
     #[serde(default)]
     pub name: Option<String>,
     /// Description (for create)
     #[serde(default)]
     pub description: Option<String>,
-    /// YAML content (for create/validate/dry_run)
+    /// YAML content (for create/validate/dry_run/test)
     #[serde(default)]
     pub yaml_content: Option<String>,
     /// Sample inputs (for dry_run)
@@ -342,10 +342,10 @@ impl RoutinesMcpServer {
         text_ok(out.trim().to_string())
     }
 
-    #[tool(description = "Get DSL schema, read/create/validate/dry-run/test routines")]
-    async fn manage(
+    #[tool(description = "Routine meta-operations: schema/get/create/validate/dry_run/test/history/log")]
+    async fn meta(
         &self,
-        Parameters(params): Parameters<ManageRoutineParams>,
+        Parameters(params): Parameters<MetaParams>,
     ) -> Result<CallToolResult, ErrorData> {
         match params.action.as_str() {
             "schema" => {
@@ -427,9 +427,77 @@ impl RoutinesMcpServer {
                 let _ = write!(out, "\n{pass} passed, {fail} failed");
                 return text_ok(out.trim().to_string());
             }
+            "history" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' required for history".into()))?;
+                let db = AuditDb::open(&routines_dir().join("data.db"))
+                    .map_err(|e| err_internal(format!("DB error: {e}")))?;
+                let runs = db
+                    .get_history(&name, 10)
+                    .map_err(|e| err_internal(format!("Query error: {e}")))?;
+                if runs.is_empty() {
+                    return text_ok(format!("No runs found for '{name}'"));
+                }
+                let mut out = String::new();
+                for r in &runs {
+                    let ended = r.ended_at.as_deref().unwrap_or("—");
+                    let _ = writeln!(
+                        out,
+                        "{} {} started={} ended={}",
+                        &r.run_id[..8],
+                        r.status,
+                        r.started_at,
+                        ended,
+                    );
+                }
+                return text_ok(out.trim().to_string());
+            }
+            "log" => {
+                let run_id = params
+                    .name
+                    .ok_or_else(|| err_params("'name' (as run_id) required for log".into()))?;
+                let db = AuditDb::open(&routines_dir().join("data.db"))
+                    .map_err(|e| err_internal(format!("DB error: {e}")))?;
+                let log = db
+                    .get_run_log(&run_id)
+                    .map_err(|e| err_internal(format!("Query error: {e}")))?;
+                let Some(log) = log else {
+                    return Err(err_params(format!("Run '{run_id}' not found")));
+                };
+                let mut out = String::new();
+                let _ = writeln!(out, "{} {} {}", log.routine_name, log.status, log.run_id);
+                for step in &log.steps {
+                    let icon = if step.status == "SUCCESS" { "OK" } else { "FAIL" };
+                    let _ = writeln!(
+                        out,
+                        "[{icon}] {} exit={} {}ms",
+                        step.step_id,
+                        step.exit_code.unwrap_or(-1),
+                        step.execution_time_ms,
+                    );
+                    if step.status != "SUCCESS"
+                        && let Some(stderr) = &step.stderr
+                    {
+                        let trimmed = stderr.trim();
+                        if !trimmed.is_empty() {
+                            for line in trimmed.lines().take(10) {
+                                let _ = writeln!(out, "  {line}");
+                            }
+                        }
+                    }
+                }
+                if let Some(output) = &log.output {
+                    let trimmed = output.trim();
+                    if !trimmed.is_empty() {
+                        let _ = writeln!(out, "---\n{trimmed}");
+                    }
+                }
+                return text_ok(out.trim().to_string());
+            }
             other => {
                 return Err(err_params(format!(
-                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run, test"
+                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run, test, history, log"
                 )));
             }
         }
@@ -846,6 +914,21 @@ impl RoutinesMcpServer {
                         }
                     }
                 }
+                // Diagnostic hint
+                let failed_step = result
+                    .step_results
+                    .iter()
+                    .find(|s| s.status == StepStatus::Failed);
+                if let Some(fs) = failed_step {
+                    let hint = if fs.stderr.contains("timeout") || fs.stderr.contains("timed out") {
+                        "increase step/routine timeout or optimize command"
+                    } else if fs.stderr.contains("Missing required input") {
+                        "check required inputs with meta(action='get')"
+                    } else {
+                        "use meta(action='log', name='<run_id>') for full stderr"
+                    };
+                    let _ = write!(out, "hint: {hint}");
+                }
             }
         }
 
@@ -862,7 +945,7 @@ impl ServerHandler for RoutinesMcpServer {
         info.server_info = Implementation::new("routines", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Routines: workflow engine. list_routines → discover, \
-             run_routine → execute, manage → schema/get/create/validate/dry_run/test."
+             run → execute, meta → schema/get/create/validate/dry_run/test/history/log."
                 .into(),
         );
         info

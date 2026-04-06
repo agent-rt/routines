@@ -166,6 +166,37 @@ impl AuditDb {
             Ok(None)
         }
     }
+    /// Query recent run history for a routine by name.
+    pub fn get_history(&self, routine_name: &str, limit: usize) -> Result<Vec<RunSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, status, started_at, ended_at FROM routine_runs \
+             WHERE routine_name = ?1 ORDER BY started_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![routine_name, limit], |row| {
+            let started: String = row.get(2)?;
+            let ended: Option<String> = row.get(3)?;
+            Ok(RunSummary {
+                run_id: row.get(0)?,
+                status: row.get(1)?,
+                started_at: started,
+                ended_at: ended,
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+}
+
+/// Summary of a single routine run.
+#[derive(Debug, serde::Serialize)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
 }
 
 /// A complete run log with all step details.
