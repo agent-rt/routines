@@ -298,6 +298,99 @@ fn execute_step_with_retry(
     Ok(result)
 }
 
+/// Execute a step with for_each iteration. Falls through to `execute_step_with_retry` if no for_each.
+/// Returns a list of StepResults (one per iteration, or one if no for_each).
+fn execute_step_with_foreach(
+    step: &Step,
+    routine: &Routine,
+    ctx: &mut Context,
+    secrets: &HashMap<String, String>,
+    routines_dir: &PathBuf,
+    depth: u32,
+) -> Result<Vec<StepResult>> {
+    use crate::parser::ForEach;
+
+    let Some(for_each) = &step.for_each else {
+        // No for_each — single execution
+        let result = execute_step_with_retry(step, routine, ctx, secrets, routines_dir, depth)?;
+        return Ok(vec![result]);
+    };
+
+    // Resolve the iteration list
+    let items: Vec<String> = match for_each {
+        ForEach::List(list) => list
+            .iter()
+            .map(|item| ctx.resolve(item, &step.id).unwrap_or_else(|_| item.clone()))
+            .collect(),
+        ForEach::Template(template) => {
+            let resolved = ctx.resolve(template, &step.id)?;
+            // Try to parse as JSON array
+            serde_json::from_str::<Vec<String>>(&resolved).unwrap_or_else(|_| {
+                // Fallback: treat as newline-separated text
+                resolved
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect()
+            })
+        }
+    };
+
+    if items.is_empty() {
+        // Empty list — skip
+        return Ok(vec![StepResult {
+            step_id: step.id.clone(),
+            status: StepStatus::Skipped,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: "for_each: empty list".to_string(),
+            execution_time_ms: 0,
+        }]);
+    }
+
+    let mut results = Vec::with_capacity(items.len());
+
+    for (index, item) in items.iter().enumerate() {
+        // Inject iteration variables
+        let prev = ctx.set_iteration(item.clone(), index);
+
+        let result = execute_step_with_retry(step, routine, ctx, secrets, routines_dir, depth)?;
+
+        // Restore iteration state
+        ctx.restore_iteration(prev);
+
+        let mut result = result;
+        // Tag step_id with iteration index
+        result.step_id = format!("{}[{}]", step.id, index);
+
+        let failed = result.status == StepStatus::Failed;
+        results.push(result);
+
+        if failed {
+            // Stop iteration on failure (respects on_fail at the step level in the caller)
+            break;
+        }
+    }
+
+    // Store aggregated stdout in context for downstream reference under the original step_id.
+    // Last iteration's stdout is stored as step_id.stdout (backward compat).
+    if let Some(last) = results.last() {
+        let last_stdout = last.stdout.trim().to_string();
+        let last_stderr = last.stderr.trim().to_string();
+        let last_exit = last.exit_code;
+        ctx.add_step_output(
+            step.id.clone(),
+            StepOutput {
+                stdout: last_stdout,
+                stderr: last_stderr,
+                exit_code: last_exit,
+            },
+        );
+    }
+
+    Ok(results)
+}
+
 /// Sequential execution path (no `needs` declared — original behavior).
 fn run_sequential(
     routine: &Routine,
@@ -310,21 +403,30 @@ fn run_sequential(
     let mut has_failure = false;
 
     for step in &routine.steps {
-        let result =
-            execute_step_with_retry(step, routine, &ctx, &secrets, &routines_dir, depth)?;
+        let results =
+            execute_step_with_foreach(step, routine, &mut ctx, &secrets, &routines_dir, depth)?;
 
-        let status = result.status.clone();
-        ctx.add_step_output(
-            step.id.clone(),
-            StepOutput {
-                stdout: result.stdout.trim().to_string(),
-                stderr: result.stderr.trim().to_string(),
-                exit_code: result.exit_code,
-            },
-        );
-        step_results.push(result);
+        // For non-foreach steps, context is already updated in execute_step_with_foreach
+        // For foreach steps, context is updated with last iteration's output
+        let any_failed = results.iter().any(|r| r.status == StepStatus::Failed);
 
-        if status == StepStatus::Failed {
+        // If this is NOT a for_each step, update context normally
+        if step.for_each.is_none()
+            && let Some(result) = results.first()
+        {
+            ctx.add_step_output(
+                step.id.clone(),
+                StepOutput {
+                    stdout: result.stdout.trim().to_string(),
+                    stderr: result.stderr.trim().to_string(),
+                    exit_code: result.exit_code,
+                },
+            );
+        }
+
+        step_results.extend(results);
+
+        if any_failed {
             if step.on_fail == OnFail::Continue {
                 has_failure = true;
             } else {
@@ -371,7 +473,7 @@ fn run_dag(
     // Shared state for DAG scheduling
     let ctx = Arc::new(Mutex::new(ctx));
     let completed: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-    let results: Arc<Mutex<HashMap<String, StepResult>>> = Arc::new(Mutex::new(HashMap::new()));
+    let results: Arc<Mutex<HashMap<String, Vec<StepResult>>>> = Arc::new(Mutex::new(HashMap::new()));
     let in_degree = Arc::new(Mutex::new(in_degree));
     let aborted = Arc::new(Mutex::new(false));
     let notify = Arc::new(Condvar::new());
@@ -411,14 +513,14 @@ fn run_dag(
                     let mut comp = completed.lock().unwrap();
                     res.insert(
                         step_id.clone(),
-                        StepResult {
+                        vec![StepResult {
                             step_id: step_id.clone(),
                             status: StepStatus::Skipped,
                             exit_code: None,
                             stdout: String::new(),
                             stderr: "Skipped due to upstream failure".to_string(),
                             execution_time_ms: 0,
-                        },
+                        }],
                     );
                     comp.insert(step_id);
                     continue;
@@ -434,44 +536,56 @@ fn run_dag(
                 let routines_dir = routines_dir.clone();
 
                 handles.push(scope.spawn(move || {
-                    let ctx_snapshot = ctx.lock().unwrap().clone();
-                    let result = execute_step_with_retry(
-                        step, routine, &ctx_snapshot, &secrets, &routines_dir, depth,
+                    let mut ctx_snapshot = ctx.lock().unwrap().clone();
+                    let step_results = execute_step_with_foreach(
+                        step, routine, &mut ctx_snapshot, &secrets, &routines_dir, depth,
                     );
 
-                    let step_result = match result {
+                    let step_results = match step_results {
                         Ok(r) => r,
-                        Err(e) => StepResult {
+                        Err(e) => vec![StepResult {
                             step_id: step.id.clone(),
                             status: StepStatus::Failed,
                             exit_code: Some(1),
                             stdout: String::new(),
                             stderr: e.to_string(),
                             execution_time_ms: 0,
-                        },
+                        }],
                     };
 
-                    // Write output to context
+                    let any_failed = step_results.iter().any(|r| r.status == StepStatus::Failed);
+
+                    // Write output to shared context
                     {
                         let mut ctx = ctx.lock().unwrap();
-                        ctx.add_step_output(
-                            step.id.clone(),
-                            StepOutput {
-                                stdout: step_result.stdout.trim().to_string(),
-                                stderr: step_result.stderr.trim().to_string(),
-                                exit_code: step_result.exit_code,
-                            },
-                        );
+                        // For foreach: context was updated in execute_step_with_foreach
+                        // For non-foreach: update context with the single result
+                        if step.for_each.is_none() {
+                            if let Some(result) = step_results.first() {
+                                ctx.add_step_output(
+                                    step.id.clone(),
+                                    StepOutput {
+                                        stdout: result.stdout.trim().to_string(),
+                                        stderr: result.stderr.trim().to_string(),
+                                        exit_code: result.exit_code,
+                                    },
+                                );
+                            }
+                        } else {
+                            // Copy foreach's aggregated output from snapshot to shared context
+                            if let Some(output) = ctx_snapshot.get_step_output(&step.id) {
+                                ctx.add_step_output(step.id.clone(), output.clone());
+                            }
+                        }
                     }
 
                     // Check failure
-                    if step_result.status == StepStatus::Failed
-                        && step.on_fail != OnFail::Continue
-                    {
+                    if any_failed && step.on_fail != OnFail::Continue {
                         *aborted.lock().unwrap() = true;
                     }
 
-                    results_ref.lock().unwrap().insert(step.id.clone(), step_result);
+                    // Store all results (multiple for foreach)
+                    results_ref.lock().unwrap().insert(step.id.clone(), step_results);
                     completed.lock().unwrap().insert(step.id.clone());
                     notify.notify_all();
                 }));
@@ -523,11 +637,13 @@ fn run_dag(
     let was_aborted = *aborted.lock().unwrap();
 
     for step in &routine.steps {
-        if let Some(result) = results_map.get(&step.id) {
-            if result.status == StepStatus::Failed {
-                has_failure = true;
+        if let Some(step_res) = results_map.get(&step.id) {
+            for r in step_res {
+                if r.status == StepStatus::Failed {
+                    has_failure = true;
+                }
+                step_results.push(r.clone());
             }
-            step_results.push(result.clone());
         } else {
             // Step never ran (aborted before reaching it)
             step_results.push(StepResult {
@@ -1118,5 +1234,200 @@ steps:
         assert_eq!(result.status, RunStatus::Failed);
         assert_eq!(result.step_results[0].status, StepStatus::Failed);
         assert_eq!(result.step_results[1].status, StepStatus::Success);
+    }
+
+    #[test]
+    fn for_each_static_list() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_static
+description: test
+steps:
+  - id: greet
+    type: cli
+    command: echo
+    args: ["hello {{ item }}"]
+    for_each:
+      - alice
+      - bob
+      - charlie
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results.len(), 3);
+        assert_eq!(result.step_results[0].step_id, "greet[0]");
+        assert_eq!(result.step_results[1].step_id, "greet[1]");
+        assert_eq!(result.step_results[2].step_id, "greet[2]");
+        assert!(result.step_results[0].stdout.contains("hello alice"));
+        assert!(result.step_results[1].stdout.contains("hello bob"));
+        assert!(result.step_results[2].stdout.contains("hello charlie"));
+    }
+
+    #[test]
+    fn for_each_item_index() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_index
+description: test
+steps:
+  - id: idx
+    type: cli
+    command: echo
+    args: ["{{ item_index }}:{{ item }}"]
+    for_each:
+      - alpha
+      - beta
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert!(result.step_results[0].stdout.contains("0:alpha"));
+        assert!(result.step_results[1].stdout.contains("1:beta"));
+    }
+
+    #[test]
+    fn for_each_template_stdout_lines() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_lines
+description: test
+steps:
+  - id: list
+    type: cli
+    command: /bin/sh
+    args: ["-c", "printf 'one\ntwo\nthree\n'"]
+  - id: process
+    type: cli
+    command: echo
+    args: ["got {{ item }}"]
+    for_each: "{{ list.stdout_lines }}"
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        // 1 step for list + 3 iterations for process
+        assert_eq!(result.step_results.len(), 4);
+        assert!(result.step_results[1].stdout.contains("got one"));
+        assert!(result.step_results[2].stdout.contains("got two"));
+        assert!(result.step_results[3].stdout.contains("got three"));
+    }
+
+    #[test]
+    fn for_each_failure_stops_iteration() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_fail
+description: test
+steps:
+  - id: might_fail
+    type: cli
+    command: /bin/sh
+    args: ["-c", "if [ '{{ item }}' = 'bad' ]; then exit 1; fi; echo ok"]
+    for_each:
+      - good
+      - bad
+      - never
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        // Should have 2 results: good (success) + bad (failed), "never" not reached
+        assert_eq!(result.step_results.len(), 2);
+        assert_eq!(result.step_results[0].status, StepStatus::Success);
+        assert_eq!(result.step_results[1].status, StepStatus::Failed);
+    }
+
+    #[test]
+    fn for_each_with_on_fail_continue() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_continue
+description: test
+steps:
+  - id: try_each
+    type: cli
+    command: /bin/sh
+    args: ["-c", "if [ '{{ item }}' = 'bad' ]; then exit 1; fi; echo ok"]
+    for_each:
+      - good
+      - bad
+      - also_good
+    on_fail: continue
+  - id: after
+    type: cli
+    command: echo
+    args: ["done"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        // on_fail: continue means routine continues after foreach failure
+        // but iteration still stops at first failure within the loop
+        assert_eq!(result.step_results.last().unwrap().step_id, "after");
+        assert_eq!(
+            result.step_results.last().unwrap().status,
+            StepStatus::Success
+        );
+    }
+
+    #[test]
+    fn for_each_empty_list_skips() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_empty
+description: test
+steps:
+  - id: noop
+    type: cli
+    command: echo
+    args: ["{{ item }}"]
+    for_each: []
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results.len(), 1);
+        assert_eq!(result.step_results[0].status, StepStatus::Skipped);
+    }
+
+    #[test]
+    fn for_each_downstream_sees_last_output() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_downstream
+description: test
+steps:
+  - id: iterate
+    type: cli
+    command: echo
+    args: ["{{ item }}"]
+    for_each:
+      - first
+      - second
+      - last
+  - id: check
+    type: cli
+    command: echo
+    args: ["prev={{ iterate.stdout }}"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        // check step should see the last iteration's stdout
+        assert!(result.step_results.last().unwrap().stdout.contains("prev=last"));
     }
 }

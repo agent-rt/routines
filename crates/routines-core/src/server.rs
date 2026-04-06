@@ -147,6 +147,7 @@ Step (common fields):
     count: integer (required) — max retries (total attempts = count + 1)
     delay: integer (default: 1) — initial delay in seconds
     backoff: fixed|exponential (default: fixed) — exponential doubles delay each retry
+  for_each: list or template (optional) — iterate step over items, injecting {{ item }} and {{ item_index }}
 
 Step (type: cli):
   command: String (required) — executable name or path
@@ -173,9 +174,12 @@ Step (type: mcp):
 Template syntax:
   {{ inputs.NAME }}       — input parameter value
   {{ secrets.KEY }}       — secret from ~/.routines/.env
-  {{ step_id.stdout }}    — stdout of a previous step (trimmed)
-  {{ step_id.stderr }}    — stderr of a previous step (trimmed)
-  {{ step_id.exit_code }} — exit code of a previous step (integer string)
+  {{ step_id.stdout }}       — stdout of a previous step (trimmed)
+  {{ step_id.stderr }}       — stderr of a previous step (trimmed)
+  {{ step_id.exit_code }}    — exit code of a previous step (integer string)
+  {{ step_id.stdout_lines }} — stdout split by newline as JSON array (for use with for_each)
+  {{ item }}                 — current iteration value (inside for_each)
+  {{ item_index }}           — current iteration index, 0-based (inside for_each)
 
 Example:
   name: greet
@@ -564,6 +568,19 @@ impl RoutinesMcpServer {
                     "    retry: {}x, delay={}s, backoff={:?}",
                     retry.count, retry.delay, retry.backoff
                 );
+            }
+            if let Some(for_each) = &step.for_each {
+                match for_each {
+                    crate::parser::ForEach::List(items) => {
+                        let _ = writeln!(out, "    for_each: [{}]", items.join(", "));
+                    }
+                    crate::parser::ForEach::Template(t) => {
+                        let resolved = ctx
+                            .resolve(t, &step.id)
+                            .unwrap_or_else(|e| format!("<error: {e}>"));
+                        let _ = writeln!(out, "    for_each: {resolved}");
+                    }
+                }
             }
         }
 

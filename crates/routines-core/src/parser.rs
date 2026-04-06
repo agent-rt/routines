@@ -48,6 +48,19 @@ pub struct Step {
     /// Retry configuration. Step is retried on failure before triggering on_fail.
     #[serde(default)]
     pub retry: Option<RetryConfig>,
+    /// Iterate this step over a list. Each iteration injects `{{ item }}` and `{{ item_index }}`.
+    #[serde(default)]
+    pub for_each: Option<ForEach>,
+}
+
+/// Source of iteration items for `for_each`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ForEach {
+    /// Static list of string values declared inline in YAML.
+    List(Vec<String>),
+    /// Template expression referencing a previous step's output (e.g. `{{ step.stdout_lines }}`).
+    Template(String),
 }
 
 /// Retry configuration for a step.
@@ -523,5 +536,79 @@ steps:
 "#,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_for_each_static_list() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_test
+description: test
+steps:
+  - id: deploy
+    type: cli
+    command: kubectl
+    args: ["apply", "-f", "{{ item }}"]
+    for_each:
+      - svc-a.yml
+      - svc-b.yml
+      - svc-c.yml
+"#,
+        )
+        .unwrap();
+
+        match &routine.steps[0].for_each {
+            Some(ForEach::List(items)) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], "svc-a.yml");
+                assert_eq!(items[2], "svc-c.yml");
+            }
+            other => panic!("expected ForEach::List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_template() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_template
+description: test
+steps:
+  - id: list
+    type: cli
+    command: ls
+  - id: process
+    type: cli
+    command: echo
+    args: ["{{ item }}"]
+    for_each: "{{ list.stdout_lines }}"
+"#,
+        )
+        .unwrap();
+
+        match &routine.steps[1].for_each {
+            Some(ForEach::Template(t)) => {
+                assert_eq!(t, "{{ list.stdout_lines }}");
+            }
+            other => panic!("expected ForEach::Template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_for_each_is_none() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_foreach
+description: test
+steps:
+  - id: once
+    type: cli
+    command: echo
+    args: ["hello"]
+"#,
+        )
+        .unwrap();
+
+        assert!(routine.steps[0].for_each.is_none());
     }
 }
