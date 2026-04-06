@@ -24,3 +24,4 @@ ureq = { version = "3", features = ["json"] }
 comfy-table = "7"
 colored = "3"
 indexmap = { version = "2", features = ["serde"] }
+inquire = "0.7"

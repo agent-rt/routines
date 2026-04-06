@@ -282,6 +282,139 @@ fn cmd_validate(file: &std::path::Path) -> routines_core::error::Result<()> {
     }
 }
 
+fn prompt_missing_inputs(
+    inputs_def: &[routines_core::parser::InputDef],
+    provided: &HashMap<String, String>,
+) -> routines_core::error::Result<HashMap<String, String>> {
+    use routines_core::parser::InputType;
+
+    let mut result = provided.clone();
+
+    for input in inputs_def {
+        if result.contains_key(&input.name) {
+            continue;
+        }
+
+        let label = match &input.description {
+            Some(desc) => format!("{} ({})", input.name, desc),
+            None => input.name.clone(),
+        };
+
+        let value = match &input.input_type {
+            InputType::Bool => {
+                let default_val = input
+                    .default
+                    .as_deref()
+                    .map(|d| d == "true")
+                    .unwrap_or(false);
+                let ans = inquire::Confirm::new(&label)
+                    .with_default(default_val)
+                    .prompt();
+                match ans {
+                    Ok(v) => Some(v.to_string()),
+                    Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                        std::process::exit(130);
+                    }
+                    Err(e) => return Err(routines_core::error::RoutineError::Io(
+                        std::io::Error::other(e.to_string()),
+                    )),
+                }
+            }
+            InputType::Enum => {
+                let Some(values) = &input.enum_values else {
+                    continue;
+                };
+                let mut prompt = inquire::Select::new(&label, values.clone());
+                if let Some(def) = &input.default
+                    && let Some(idx) = values.iter().position(|v| v == def)
+                {
+                    prompt = prompt.with_starting_cursor(idx);
+                }
+                match prompt.prompt() {
+                    Ok(v) => Some(v),
+                    Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                        std::process::exit(130);
+                    }
+                    Err(e) => return Err(routines_core::error::RoutineError::Io(
+                        std::io::Error::other(e.to_string()),
+                    )),
+                }
+            }
+            other => {
+                let mut prompt = inquire::Text::new(&label);
+                if let Some(def) = &input.default {
+                    prompt = prompt.with_default(def);
+                }
+                if !input.required && input.default.is_none() {
+                    prompt = prompt.with_help_message("optional, press Enter to skip");
+                }
+                let ans = match other {
+                    InputType::Int => prompt
+                        .with_validator(|input: &str| {
+                            if input.is_empty() || input.parse::<i64>().is_ok() {
+                                Ok(inquire::validator::Validation::Valid)
+                            } else {
+                                Ok(inquire::validator::Validation::Invalid("Must be an integer".into()))
+                            }
+                        })
+                        .prompt(),
+                    InputType::Float => prompt
+                        .with_validator(|input: &str| {
+                            if input.is_empty() || input.parse::<f64>().is_ok() {
+                                Ok(inquire::validator::Validation::Valid)
+                            } else {
+                                Ok(inquire::validator::Validation::Invalid("Must be a number".into()))
+                            }
+                        })
+                        .prompt(),
+                    InputType::Date => prompt
+                        .with_validator(|input: &str| {
+                            if input.is_empty() {
+                                return Ok(inquire::validator::Validation::Valid);
+                            }
+                            let parts: Vec<&str> = input.split('-').collect();
+                            if parts.len() == 3
+                                && parts[0].len() == 4
+                                && parts[1].len() == 2
+                                && parts[2].len() == 2
+                                && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+                            {
+                                Ok(inquire::validator::Validation::Valid)
+                            } else {
+                                Ok(inquire::validator::Validation::Invalid("Must be YYYY-MM-DD format".into()))
+                            }
+                        })
+                        .prompt(),
+                    _ => prompt.prompt(),
+                };
+                match ans {
+                    Ok(v) if v.is_empty() && !input.required => None,
+                    Ok(v) if v.is_empty() && input.required => {
+                        return Err(routines_core::error::RoutineError::InvalidInput {
+                            name: input.name.clone(),
+                            expected: format!("{:?}", input.input_type),
+                            got: "empty".to_string(),
+                        });
+                    }
+                    Ok(v) => Some(v),
+                    Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                        std::process::exit(130);
+                    }
+                    Err(e) => return Err(routines_core::error::RoutineError::Io(
+                        std::io::Error::other(e.to_string()),
+                    )),
+                }
+            }
+        };
+
+        if let Some(v) = value {
+            result.insert(input.name.clone(), v);
+        }
+    }
+
+    Ok(result)
+}
+
 fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::error::Result<()> {
     use colored::Colorize;
     use std::io::IsTerminal;
@@ -297,13 +430,18 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::err
     let is_tty = std::io::stdout().is_terminal() && !quiet;
 
     // Parse KEY=VALUE inputs
-    let inputs: HashMap<String, String> = raw_inputs
+    let mut inputs: HashMap<String, String> = raw_inputs
         .iter()
         .filter_map(|s| {
             let (k, v) = s.split_once('=')?;
             Some((k.to_string(), v.to_string()))
         })
         .collect();
+
+    // TTY mode: interactively prompt for missing inputs
+    if std::io::stdin().is_terminal() && !quiet {
+        inputs = prompt_missing_inputs(&routine.inputs, &inputs)?;
+    }
 
     // Load secrets
     let secrets = secrets::load_secrets(&routines_dir().join(".env"));
@@ -349,18 +487,22 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::err
         table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
         table.set_header(vec!["#", "Step", "Status", "Exit", "Time"]);
         for (i, step) in result.step_results.iter().enumerate() {
+            use comfy_table::{Cell, Color as TColor};
+            let status_cell = match step.status {
+                StepStatus::Success => Cell::new("OK").fg(TColor::Green),
+                StepStatus::Failed => Cell::new("FAIL").fg(TColor::Red),
+                StepStatus::Skipped => Cell::new("SKIP").fg(TColor::Yellow),
+            };
             table.add_row(vec![
-                (i + 1).to_string(),
-                step.step_id.clone(),
-                match step.status {
-                    StepStatus::Success => "OK".green().to_string(),
-                    StepStatus::Failed => "FAIL".red().to_string(),
-                    StepStatus::Skipped => "SKIP".yellow().to_string(),
-                },
-                step.exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or("-".into()),
-                format!("{}ms", step.execution_time_ms),
+                Cell::new(i + 1),
+                Cell::new(&step.step_id),
+                status_cell,
+                Cell::new(
+                    step.exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or("-".into()),
+                ),
+                Cell::new(format!("{}ms", step.execution_time_ms)),
             ]);
         }
         eprintln!("{table}");
