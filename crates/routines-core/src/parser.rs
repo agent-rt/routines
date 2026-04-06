@@ -27,6 +27,22 @@ pub struct Routine {
     /// Maximum execution time for the entire routine in seconds.
     #[serde(default, rename = "timeout")]
     pub routine_timeout: Option<u64>,
+    /// Audit level: full (every step), summary (run + failures only), none (no audit).
+    #[serde(default)]
+    pub audit: AuditLevel,
+}
+
+/// Audit logging level for a routine.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditLevel {
+    /// Log every step to audit DB.
+    Full,
+    /// Log run result + failed steps only (default).
+    #[default]
+    Summary,
+    /// No audit logging at all.
+    None,
 }
 
 /// Secrets injection mode for CLI subprocess environment variables.

@@ -94,6 +94,7 @@ Top-level fields:
   finally: list of Step (default: []) — cleanup steps, always run after main steps regardless of success/failure
   output: String (optional) — template expression resolved after all steps, returned as routine result
   output_format: plain|table (default: plain) — table expects JSON array, renders as table in CLI
+  audit: full|summary|none (default: summary) — full: log every step; summary: run + failures only; none: no audit
 
 InputDef:
   name: String (required)
@@ -1042,33 +1043,60 @@ impl RoutinesMcpServer {
         let routine = Routine::from_file(&yaml_path)
             .map_err(|e| err_internal(format!("Parse error: {e}")))?;
 
+        use crate::parser::AuditLevel;
+
         let secret_map = secrets::load_secrets(&routines_dir().join(".env"));
-        let db = AuditDb::open(&routines_dir().join("data.db"))
-            .map_err(|e| err_internal(format!("DB error: {e}")))?;
+        let audit_level = &routine.audit;
+
+        let db = if *audit_level != AuditLevel::None {
+            Some(
+                AuditDb::open(&routines_dir().join("data.db"))
+                    .map_err(|e| err_internal(format!("DB error: {e}")))?,
+            )
+        } else {
+            None
+        };
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let short_id = &run_id[..8];
         let started_at = chrono::Utc::now().to_rfc3339();
 
         let secret_values: Vec<&str> = secret_map.values().map(|s| s.as_str()).collect();
-        let input_json = serde_json::to_string(&params.inputs).unwrap_or_default();
-        let input_redacted = secrets::redact(&input_json, &secret_values);
 
-        db.insert_run(&run_id, &routine.name, &input_redacted, &started_at)
-            .map_err(|e| err_internal(format!("DB write error: {e}")))?;
+        if let Some(db) = &db {
+            let input_json = serde_json::to_string(&params.inputs).unwrap_or_default();
+            let input_redacted = secrets::redact(&input_json, &secret_values);
+            db.insert_run(&run_id, &routine.name, &input_redacted, &started_at)
+                .map_err(|e| err_internal(format!("DB write error: {e}")))?;
+        }
 
         let result = executor::run_routine(&routine, params.inputs, secret_map.clone())
             .map_err(|e| err_internal(format!("Execution error: {e}")))?;
 
-        for step in &result.step_results {
-            let step_started = chrono::Utc::now().to_rfc3339();
-            db.insert_step_log(&run_id, step, &secret_values, &step_started)
-                .map_err(|e| err_internal(format!("DB write error: {e}")))?;
+        if let Some(db) = &db {
+            match audit_level {
+                AuditLevel::Full => {
+                    for step in &result.step_results {
+                        let step_started = chrono::Utc::now().to_rfc3339();
+                        db.insert_step_log(&run_id, step, &secret_values, &step_started)
+                            .map_err(|e| err_internal(format!("DB write error: {e}")))?;
+                    }
+                }
+                AuditLevel::Summary => {
+                    for step in &result.step_results {
+                        if step.status == StepStatus::Failed {
+                            let step_started = chrono::Utc::now().to_rfc3339();
+                            db.insert_step_log(&run_id, step, &secret_values, &step_started)
+                                .map_err(|e| err_internal(format!("DB write error: {e}")))?;
+                        }
+                    }
+                }
+                AuditLevel::None => unreachable!(),
+            }
+            let ended_at = chrono::Utc::now().to_rfc3339();
+            db.finalize_run(&run_id, &result, &ended_at)
+                .map_err(|e| err_internal(format!("DB finalize error: {e}")))?;
         }
-
-        let ended_at = chrono::Utc::now().to_rfc3339();
-        db.finalize_run(&run_id, &result, &ended_at)
-            .map_err(|e| err_internal(format!("DB finalize error: {e}")))?;
 
         let total_ms: u64 = result
             .step_results

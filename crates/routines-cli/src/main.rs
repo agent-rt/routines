@@ -41,6 +41,9 @@ enum Commands {
         /// Only output the routine's output field, no chrome
         #[arg(short, long)]
         quiet: bool,
+        /// Show step execution table (hidden by default, shown on failure)
+        #[arg(short, long)]
+        verbose: bool,
         /// Input key=value pairs
         #[arg(trailing_var_arg = true)]
         inputs: Vec<String>,
@@ -150,8 +153,9 @@ fn dispatch(cli: Cli) -> routines_core::error::Result<()> {
         Commands::Run {
             name,
             quiet,
+            verbose,
             inputs,
-        } => cmd_run(&name, &inputs, quiet),
+        } => cmd_run(&name, &inputs, quiet, verbose),
         Commands::Serve => cmd_serve(),
         Commands::Log { run_id, full } => cmd_log(&run_id, full),
         Commands::Mcp { action } => cmd_mcp(action),
@@ -520,7 +524,7 @@ fn prompt_missing_inputs(
     Ok(result)
 }
 
-fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::error::Result<()> {
+fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool, verbose: bool) -> routines_core::error::Result<()> {
     use colored::Colorize;
     use std::io::IsTerminal;
 
@@ -551,21 +555,29 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::err
     // Load secrets
     let secrets = secrets::load_secrets(&routines_dir().join(".env"));
 
-    // Open audit DB
-    let db = AuditDb::open(&routines_dir().join("data.db"))?;
+    use routines_core::parser::AuditLevel;
+
+    let audit_level = &routine.audit;
+    let secret_values: Vec<&str> = secrets.values().map(|s| s.as_str()).collect();
+
+    // Open audit DB (skip entirely for audit: none)
+    let db = if *audit_level != AuditLevel::None {
+        Some(AuditDb::open(&routines_dir().join("data.db"))?)
+    } else {
+        None
+    };
 
     // Generate run ID and timestamp
     let run_id = uuid::Uuid::new_v4().to_string();
     let started_at = chrono::Utc::now().to_rfc3339();
 
-    // Redact secrets in input_vars before storing
-    let secret_values: Vec<&str> = secrets.values().map(|s| s.as_str()).collect();
-    let input_vars_json = serde_json::to_string(&inputs).unwrap_or_default();
-    let input_vars_redacted = routines_core::secrets::redact(&input_vars_json, &secret_values);
+    if let Some(db) = &db {
+        let input_vars_json = serde_json::to_string(&inputs).unwrap_or_default();
+        let input_vars_redacted = routines_core::secrets::redact(&input_vars_json, &secret_values);
+        db.insert_run(&run_id, &routine.name, &input_vars_redacted, &started_at)?;
+    }
 
-    db.insert_run(&run_id, &routine.name, &input_vars_redacted, &started_at)?;
-
-    if is_tty {
+    if is_tty && verbose {
         eprintln!(
             "Running routine: {} (run_id: {})",
             routine.name.bold(),
@@ -576,41 +588,86 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::err
     // Execute
     let result = executor::run_routine(&routine, inputs, secrets.clone())?;
 
-    // Write step logs
-    for step in &result.step_results {
-        let step_started = chrono::Utc::now().to_rfc3339();
-        db.insert_step_log(&run_id, step, &secret_values, &step_started)?;
+    // Write step logs based on audit level
+    if let Some(db) = &db {
+        match audit_level {
+            AuditLevel::Full => {
+                for step in &result.step_results {
+                    let step_started = chrono::Utc::now().to_rfc3339();
+                    db.insert_step_log(&run_id, step, &secret_values, &step_started)?;
+                }
+            }
+            AuditLevel::Summary => {
+                // Only log failed steps
+                for step in &result.step_results {
+                    if step.status == StepStatus::Failed {
+                        let step_started = chrono::Utc::now().to_rfc3339();
+                        db.insert_step_log(&run_id, step, &secret_values, &step_started)?;
+                    }
+                }
+            }
+            AuditLevel::None => unreachable!(),
+        }
+        let ended_at = chrono::Utc::now().to_rfc3339();
+        db.finalize_run(&run_id, &result, &ended_at)?;
     }
 
-    // Finalize run
-    let ended_at = chrono::Utc::now().to_rfc3339();
-    db.finalize_run(&run_id, &result, &ended_at)?;
-
     if is_tty {
-        // Step summary table
-        let mut table = comfy_table::Table::new();
-        table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
-        table.set_header(vec!["#", "Step", "Status", "Exit", "Time"]);
-        for (i, step) in result.step_results.iter().enumerate() {
-            use comfy_table::{Cell, Color as TColor};
-            let status_cell = match step.status {
-                StepStatus::Success => Cell::new("OK").fg(TColor::Green),
-                StepStatus::Failed => Cell::new("FAIL").fg(TColor::Red),
-                StepStatus::Skipped => Cell::new("SKIP").fg(TColor::Yellow),
+        let is_failed = result.status == RunStatus::Failed;
+        let total_steps = result.step_results.len();
+        let ok_steps = result.step_results.iter().filter(|s| s.status == StepStatus::Success).count();
+        let total_ms: u64 = result.step_results.iter().map(|s| s.execution_time_ms).sum();
+
+        // Show step table only on failure or --verbose
+        if verbose || is_failed {
+            let mut table = comfy_table::Table::new();
+            table.load_preset(comfy_table::presets::UTF8_FULL);
+            table.set_header(vec!["#", "Step", "Status", "Exit", "Time"]);
+            for (i, step) in result.step_results.iter().enumerate() {
+                use comfy_table::{Cell, Color as TColor};
+                let status_cell = match step.status {
+                    StepStatus::Success => Cell::new("OK").fg(TColor::Green),
+                    StepStatus::Failed => Cell::new("FAIL").fg(TColor::Red),
+                    StepStatus::Skipped => Cell::new("SKIP").fg(TColor::Yellow),
+                };
+                table.add_row(vec![
+                    Cell::new(i + 1),
+                    Cell::new(&step.step_id),
+                    status_cell,
+                    Cell::new(
+                        step.exit_code
+                            .map(|c| c.to_string())
+                            .unwrap_or("-".into()),
+                    ),
+                    Cell::new(format!("{}ms", step.execution_time_ms)),
+                ]);
+            }
+            eprintln!("{table}");
+
+            // On failure, show stderr of failed steps
+            if is_failed {
+                for step in &result.step_results {
+                    if step.status == StepStatus::Failed && !step.stderr.is_empty() {
+                        eprintln!("{} {}", "stderr:".red(), step.stderr.trim());
+                    }
+                }
+            }
+        } else {
+            // Compact status line
+            let time_str = if total_ms >= 1000 {
+                format!("{:.1}s", total_ms as f64 / 1000.0)
+            } else {
+                format!("{total_ms}ms")
             };
-            table.add_row(vec![
-                Cell::new(i + 1),
-                Cell::new(&step.step_id),
-                status_cell,
-                Cell::new(
-                    step.exit_code
-                        .map(|c| c.to_string())
-                        .unwrap_or("-".into()),
-                ),
-                Cell::new(format!("{}ms", step.execution_time_ms)),
-            ]);
+            eprintln!(
+                "{} {} {}/{} steps {}",
+                "✓".green().bold(),
+                routine.name.bold(),
+                ok_steps,
+                total_steps,
+                time_str.dimmed(),
+            );
         }
-        eprintln!("{table}");
 
         // Output
         if let Some(output) = &result.output {
@@ -620,13 +677,10 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::err
             }
         }
 
-        // Result
-        match result.status {
-            RunStatus::Success => eprintln!("Result: {}", "SUCCESS".green().bold()),
-            RunStatus::Failed => {
-                eprintln!("Result: {}", "FAILED".red().bold());
-                std::process::exit(1);
-            }
+        // Result (only show explicit FAILED, success is implied by ✓)
+        if is_failed {
+            eprintln!("Result: {}", "FAILED".red().bold());
+            std::process::exit(1);
         }
     } else {
         // Pipe mode: only output
@@ -665,7 +719,8 @@ fn render_output(
 
                 if is_tty {
                     let mut table = comfy_table::Table::new();
-                    table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+                    table.load_preset(comfy_table::presets::UTF8_FULL);
+                    table.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
                     table.set_header(columns.iter().map(|c| c.as_str()));
                     for row in &rows {
                         let cells: Vec<String> = columns

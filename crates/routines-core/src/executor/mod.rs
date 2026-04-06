@@ -582,74 +582,68 @@ fn execute_step_with_foreach(
         }
         results
     } else {
-        // Concurrent path
+        // Concurrent path: process items in batches of `effective_concurrency`
         use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
         let aborted = Arc::new(AtomicBool::new(false));
-        let results: Arc<Mutex<Vec<(usize, StepResult)>>> =
-            Arc::new(Mutex::new(Vec::with_capacity(items.len())));
+        let mut all_results: Vec<(usize, StepResult)> = Vec::with_capacity(items.len());
 
-        // Use a channel as a semaphore to limit concurrency
-        let (sem_tx, sem_rx) = std::sync::mpsc::sync_channel::<()>(effective_concurrency);
-        // Pre-fill semaphore slots
-        for _ in 0..effective_concurrency {
-            let _ = sem_tx.send(());
-        }
-
-        std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-
-            for (index, item) in items.iter().enumerate() {
-                if aborted.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                // Acquire semaphore slot (blocks if all slots in use)
-                let Ok(()) = sem_rx.recv() else { break };
-
-                let mut ctx_snapshot = ctx.clone();
-                ctx_snapshot.set_iteration(item.clone(), index);
-
-                let results_ref = Arc::clone(&results);
-                let aborted_ref = Arc::clone(&aborted);
-                let sem_tx = sem_tx.clone();
-
-                handles.push(scope.spawn(move || {
-                    let result = execute_step_with_retry(
-                        step, routine, &ctx_snapshot, secrets, routines_dir, depth,
-                    );
-
-                    let mut sr = match result {
-                        Ok(r) => r,
-                        Err(e) => StepResult {
-                            step_id: step.id.clone(),
-                            status: StepStatus::Failed,
-                            exit_code: Some(1),
-                            stdout: String::new(),
-                            stderr: e.to_string(),
-                            execution_time_ms: 0,
-                        },
-                    };
-                    sr.step_id = format!("{}[{}]", step.id, index);
-
-                    if sr.status == StepStatus::Failed {
-                        aborted_ref.store(true, Ordering::Relaxed);
-                    }
-
-                    results_ref.lock().unwrap().push((index, sr));
-
-                    // Release semaphore slot
-                    let _ = sem_tx.send(());
-                }));
+        for batch_start in (0..items.len()).step_by(effective_concurrency) {
+            if aborted.load(Ordering::Relaxed) {
+                break;
             }
 
-            // All threads join automatically at scope exit
-        });
+            let batch_end = (batch_start + effective_concurrency).min(items.len());
+            let batch_results: Arc<Mutex<Vec<(usize, StepResult)>>> =
+                Arc::new(Mutex::new(Vec::new()));
+
+            std::thread::scope(|scope| {
+                for (index, item) in items.iter().enumerate().skip(batch_start).take(batch_end - batch_start) {
+                    if aborted.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let mut ctx_snapshot = ctx.clone();
+                    ctx_snapshot.set_iteration(item.clone(), index);
+
+                    let results_ref = Arc::clone(&batch_results);
+                    let aborted_ref = Arc::clone(&aborted);
+
+                    scope.spawn(move || {
+                        let result = execute_step_with_retry(
+                            step, routine, &ctx_snapshot, secrets, routines_dir, depth,
+                        );
+
+                        let mut sr = match result {
+                            Ok(r) => r,
+                            Err(e) => StepResult {
+                                step_id: step.id.clone(),
+                                status: StepStatus::Failed,
+                                exit_code: Some(1),
+                                stdout: String::new(),
+                                stderr: e.to_string(),
+                                execution_time_ms: 0,
+                            },
+                        };
+                        sr.step_id = format!("{}[{}]", step.id, index);
+
+                        if sr.status == StepStatus::Failed {
+                            aborted_ref.store(true, Ordering::Relaxed);
+                        }
+
+                        results_ref.lock().unwrap().push((index, sr));
+                    });
+                }
+                // All threads in this batch join at scope exit
+            });
+
+            let batch = Arc::try_unwrap(batch_results).unwrap().into_inner().unwrap();
+            all_results.extend(batch);
+        }
 
         // Sort by original index to preserve order
-        let mut indexed = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
-        indexed.sort_by_key(|(idx, _)| *idx);
-        indexed.into_iter().map(|(_, r)| r).collect()
+        all_results.sort_by_key(|(idx, _)| *idx);
+        all_results.into_iter().map(|(_, r)| r).collect()
     };
 
     // Aggregate all iteration stdouts as a JSON array for downstream steps.
