@@ -58,6 +58,75 @@ pub struct GetRunLogParams {
     pub run_id: String,
 }
 
+/// Parameter struct for get_routine
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetRoutineParams {
+    /// Routine name (matches filename in hub without .yml extension)
+    pub name: String,
+}
+
+/// Parameter struct for validate_routine
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ValidateRoutineParams {
+    /// Complete YAML content to validate
+    pub yaml_content: String,
+}
+
+/// Parameter struct for dry_run_routine
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DryRunRoutineParams {
+    /// Complete YAML content of the routine
+    pub yaml_content: String,
+    /// Sample input parameters for template resolution
+    #[serde(default)]
+    pub inputs: HashMap<String, String>,
+}
+
+const DSL_SCHEMA: &str = "\
+Routine YAML DSL Reference
+===========================
+Top-level fields:
+  name: String (required)
+  description: String (required)
+  strict_mode: bool (default: false) — blocks dangerous commands (rm -rf, mkfs, etc.)
+  inputs: list of InputDef (default: [])
+  steps: list of Step (required)
+
+InputDef:
+  name: String (required)
+  required: bool (default: false)
+  default: String (optional)
+  description: String (optional)
+
+Step:
+  id: String (required) — unique identifier, used in {{ step_id.stdout }}
+  type: cli (required)
+  command: String (required) — executable name or path
+  args: list of String (default: [])
+  env: map of String→String (default: {})
+  stdin: String (optional) — content piped to subprocess stdin
+  working_dir: String (optional) — working directory for subprocess
+  timeout: integer (optional) — seconds before step is killed
+
+Template syntax:
+  {{ inputs.NAME }}       — input parameter value
+  {{ secrets.KEY }}       — secret from ~/.routines/.env
+  {{ step_id.stdout }}    — stdout of a previous step (trimmed)
+  {{ step_id.stderr }}    — stderr of a previous step (trimmed)
+
+Example:
+  name: greet
+  description: Say hello
+  inputs:
+    - name: who
+      required: true
+  steps:
+    - id: say_hi
+      type: cli
+      command: echo
+      args: [\"Hello {{ inputs.who }}\"]
+";
+
 fn err_internal(msg: String) -> ErrorData {
     ErrorData::internal_error(msg, None)
 }
@@ -126,6 +195,147 @@ impl RoutinesMcpServer {
 
         if out.is_empty() {
             out = "No routines found".to_string();
+        }
+
+        text_ok(out.trim().to_string())
+    }
+
+    #[tool(description = "Return the YAML DSL reference: fields, types, template syntax, example")]
+    async fn get_dsl_schema(&self) -> Result<CallToolResult, ErrorData> {
+        text_ok(DSL_SCHEMA.trim().to_string())
+    }
+
+    #[tool(description = "Read an existing routine's YAML source by name")]
+    async fn get_routine(
+        &self,
+        Parameters(params): Parameters<GetRoutineParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let yaml_path = routines_dir()
+            .join("hub")
+            .join(format!("{}.yml", params.name));
+        if !yaml_path.exists() {
+            return Err(err_params(format!("Routine '{}' not found", params.name)));
+        }
+        let content = std::fs::read_to_string(&yaml_path)
+            .map_err(|e| err_internal(format!("Read error: {e}")))?;
+        text_ok(content)
+    }
+
+    #[tool(description = "Validate routine YAML without saving. Returns summary or parse errors.")]
+    async fn validate_routine(
+        &self,
+        Parameters(params): Parameters<ValidateRoutineParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match Routine::from_yaml(&params.yaml_content) {
+            Ok(routine) => {
+                let strict = if routine.strict_mode { "on" } else { "off" };
+                text_ok(format!(
+                    "OK: name={}, {} steps, {} inputs, strict_mode={}",
+                    routine.name,
+                    routine.steps.len(),
+                    routine.inputs.len(),
+                    strict,
+                ))
+            }
+            Err(e) => Err(err_params(format!("Invalid YAML: {e}"))),
+        }
+    }
+
+    #[tool(
+        description = "Dry-run: resolve all templates with sample inputs and show resolved commands without executing"
+    )]
+    async fn dry_run_routine(
+        &self,
+        Parameters(params): Parameters<DryRunRoutineParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let routine = Routine::from_yaml(&params.yaml_content)
+            .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
+
+        // Validate required inputs
+        for input_def in &routine.inputs {
+            if input_def.required && !params.inputs.contains_key(&input_def.name) {
+                return Err(err_params(format!(
+                    "Missing required input: {}",
+                    input_def.name
+                )));
+            }
+        }
+
+        // Build resolved inputs with defaults
+        let mut resolved_inputs = HashMap::new();
+        for input_def in &routine.inputs {
+            if let Some(value) = params.inputs.get(&input_def.name) {
+                resolved_inputs.insert(input_def.name.clone(), value.clone());
+            } else if let Some(default) = &input_def.default {
+                resolved_inputs.insert(input_def.name.clone(), default.clone());
+            }
+        }
+
+        // Use placeholder secrets for dry run
+        let secrets = secrets::load_secrets(&routines_dir().join(".env"));
+        let redacted_secrets: HashMap<String, String> = secrets
+            .keys()
+            .map(|k| (k.clone(), "[REDACTED]".to_string()))
+            .collect();
+
+        let ctx = crate::context::Context::new(resolved_inputs, redacted_secrets);
+        let mut out = String::new();
+
+        for (i, step) in routine.steps.iter().enumerate() {
+            let command = ctx
+                .resolve(&step.command, &step.id)
+                .unwrap_or_else(|e| format!("<error: {e}>"));
+            let args: Vec<String> = step
+                .args
+                .iter()
+                .map(|a| {
+                    ctx.resolve(a, &step.id)
+                        .unwrap_or_else(|e| format!("<error: {e}>"))
+                })
+                .collect();
+
+            let _ = writeln!(
+                out,
+                "[{}] {}: {} {}",
+                i + 1,
+                step.id,
+                command,
+                args.join(" ")
+            );
+
+            if !step.env.is_empty() {
+                let env_parts: Vec<String> = step
+                    .env
+                    .iter()
+                    .map(|(k, v)| {
+                        let resolved = ctx
+                            .resolve(v, &step.id)
+                            .unwrap_or_else(|e| format!("<error: {e}>"));
+                        format!("{k}={resolved}")
+                    })
+                    .collect();
+                let _ = writeln!(out, "    env: {}", env_parts.join(" "));
+            }
+            if let Some(stdin) = &step.stdin {
+                let resolved = ctx
+                    .resolve(stdin, &step.id)
+                    .unwrap_or_else(|e| format!("<error: {e}>"));
+                let preview = if resolved.len() > 80 {
+                    format!("{}...", &resolved[..80])
+                } else {
+                    resolved
+                };
+                let _ = writeln!(out, "    stdin: {preview}");
+            }
+            if let Some(dir) = &step.working_dir {
+                let resolved = ctx
+                    .resolve(dir, &step.id)
+                    .unwrap_or_else(|e| format!("<error: {e}>"));
+                let _ = writeln!(out, "    working_dir: {resolved}");
+            }
+            if let Some(timeout) = step.timeout {
+                let _ = writeln!(out, "    timeout: {timeout}s");
+            }
         }
 
         text_ok(out.trim().to_string())
@@ -323,8 +533,10 @@ impl ServerHandler for RoutinesMcpServer {
         info.server_info = Implementation::new("routines", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Routines: deterministic workflow engine for AI agents. \
-             list_routines → discover, run_routine → execute, \
-             create_routine → define, get_run_log → inspect."
+             get_dsl_schema → DSL reference, list_routines → discover, \
+             get_routine → read source, validate_routine → check YAML, \
+             dry_run_routine → preview commands, run_routine → execute, \
+             create_routine → save, get_run_log → inspect."
                 .into(),
         );
         info
