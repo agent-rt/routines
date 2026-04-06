@@ -45,6 +45,35 @@ pub struct Step {
     /// Step IDs that must complete before this step starts. Enables parallel execution.
     #[serde(default)]
     pub needs: Vec<String>,
+    /// Retry configuration. Step is retried on failure before triggering on_fail.
+    #[serde(default)]
+    pub retry: Option<RetryConfig>,
+}
+
+/// Retry configuration for a step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retries (total attempts = count + 1).
+    pub count: u32,
+    /// Delay in seconds before each retry.
+    #[serde(default = "default_delay")]
+    pub delay: u64,
+    /// Backoff strategy: fixed or exponential.
+    #[serde(default)]
+    pub backoff: BackoffStrategy,
+}
+
+fn default_delay() -> u64 {
+    1
+}
+
+/// Backoff strategy for retries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BackoffStrategy {
+    #[default]
+    Fixed,
+    Exponential,
 }
 
 /// Type-discriminated step action. Determines which fields are required.
@@ -415,6 +444,71 @@ steps:
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cyclic"));
+    }
+
+    #[test]
+    fn parse_retry_config() {
+        let routine = Routine::from_yaml(
+            r#"
+name: retry_test
+description: test
+steps:
+  - id: flaky
+    type: cli
+    command: curl
+    args: ["-f", "https://example.com"]
+    retry:
+      count: 3
+      delay: 2
+      backoff: exponential
+"#,
+        )
+        .unwrap();
+
+        let retry = routine.steps[0].retry.as_ref().unwrap();
+        assert_eq!(retry.count, 3);
+        assert_eq!(retry.delay, 2);
+        assert_eq!(retry.backoff, BackoffStrategy::Exponential);
+    }
+
+    #[test]
+    fn parse_retry_defaults() {
+        let routine = Routine::from_yaml(
+            r#"
+name: retry_default
+description: test
+steps:
+  - id: flaky
+    type: cli
+    command: curl
+    retry:
+      count: 2
+"#,
+        )
+        .unwrap();
+
+        let retry = routine.steps[0].retry.as_ref().unwrap();
+        assert_eq!(retry.count, 2);
+        assert_eq!(retry.delay, 1);
+        assert_eq!(retry.backoff, BackoffStrategy::Fixed);
+    }
+
+    #[test]
+    fn no_retry_is_none() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_retry
+description: test
+steps:
+  - id: once
+    type: cli
+    command: echo
+    args: ["hello"]
+"#,
+        )
+        .unwrap();
+
+        assert!(routine.steps[0].retry.is_none());
     }
 
     #[test]

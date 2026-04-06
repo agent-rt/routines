@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, Condvar};
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
-use crate::parser::{OnFail, Routine, Step, StepAction};
+use crate::parser::{BackoffStrategy, OnFail, Routine, Step, StepAction};
 
 /// Result of executing a single step.
 #[derive(Debug, Clone)]
@@ -235,6 +235,69 @@ fn execute_step(
     }
 }
 
+/// Execute a step with retry logic. Falls through to `execute_step` if no retry configured.
+fn execute_step_with_retry(
+    step: &Step,
+    routine: &Routine,
+    ctx: &Context,
+    secrets: &HashMap<String, String>,
+    routines_dir: &PathBuf,
+    depth: u32,
+) -> Result<StepResult> {
+    let Some(retry) = &step.retry else {
+        return execute_step(step, routine, ctx, secrets, routines_dir, depth);
+    };
+
+    let max_attempts = retry.count + 1;
+    let mut last_result = None;
+    let mut attempt_errors = Vec::new();
+    let total_start = std::time::Instant::now();
+
+    for attempt in 0..max_attempts {
+        if attempt > 0 {
+            let delay = match retry.backoff {
+                BackoffStrategy::Fixed => retry.delay,
+                BackoffStrategy::Exponential => retry.delay * 2u64.pow(attempt - 1),
+            };
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+        }
+
+        let result = execute_step(step, routine, ctx, secrets, routines_dir, depth)?;
+
+        if result.status != StepStatus::Failed {
+            // Success or Skipped — return immediately
+            let mut result = result;
+            result.execution_time_ms = total_start.elapsed().as_millis() as u64;
+            return Ok(result);
+        }
+
+        // Record failure
+        let err_msg = if result.stderr.is_empty() {
+            format!("exit code {}", result.exit_code.unwrap_or(-1))
+        } else {
+            result.stderr.trim().lines().next().unwrap_or("").to_string()
+        };
+        attempt_errors.push(format!(
+            "attempt {}/{max_attempts}: {err_msg}",
+            attempt + 1,
+        ));
+        last_result = Some(result);
+    }
+
+    // All retries exhausted
+    let mut result = last_result.unwrap();
+    result.execution_time_ms = total_start.elapsed().as_millis() as u64;
+    if !attempt_errors.is_empty() {
+        let retry_info = attempt_errors.join("\n");
+        if result.stderr.is_empty() {
+            result.stderr = retry_info;
+        } else {
+            result.stderr = format!("{}\n---\n{retry_info}", result.stderr.trim());
+        }
+    }
+    Ok(result)
+}
+
 /// Sequential execution path (no `needs` declared — original behavior).
 fn run_sequential(
     routine: &Routine,
@@ -247,7 +310,8 @@ fn run_sequential(
     let mut has_failure = false;
 
     for step in &routine.steps {
-        let result = execute_step(step, routine, &ctx, &secrets, &routines_dir, depth)?;
+        let result =
+            execute_step_with_retry(step, routine, &ctx, &secrets, &routines_dir, depth)?;
 
         let status = result.status.clone();
         ctx.add_step_output(
@@ -371,7 +435,7 @@ fn run_dag(
 
                 handles.push(scope.spawn(move || {
                     let ctx_snapshot = ctx.lock().unwrap().clone();
-                    let result = execute_step(
+                    let result = execute_step_with_retry(
                         step, routine, &ctx_snapshot, &secrets, &routines_dir, depth,
                     );
 
@@ -938,5 +1002,121 @@ steps:
         assert_eq!(result.step_results.len(), 4);
         assert!(result.step_results[3].stdout.contains("b=start"));
         assert!(result.step_results[3].stdout.contains("c=start"));
+    }
+
+    #[test]
+    fn retry_succeeds_on_second_attempt() {
+        // Use a counter file to track attempts
+        let tmp = std::env::temp_dir().join("routines_retry_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let counter = tmp.join("counter");
+        std::fs::write(&counter, "0").unwrap();
+
+        let script = format!(
+            r#"c=$(cat {p}); c=$((c+1)); echo $c > {p}; if [ $c -lt 2 ]; then exit 1; fi; echo ok"#,
+            p = counter.display()
+        );
+
+        let routine = Routine::from_yaml(&format!(
+            r#"
+name: retry_test
+description: test
+steps:
+  - id: flaky
+    type: cli
+    command: /bin/sh
+    args: ["-c", "{script}"]
+    retry:
+      count: 3
+      delay: 0
+"#
+        ))
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results[0].status, StepStatus::Success);
+        assert!(result.step_results[0].stdout.contains("ok"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn retry_exhausted_fails() {
+        let routine = Routine::from_yaml(
+            r#"
+name: retry_exhaust
+description: test
+steps:
+  - id: always_fail
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+    retry:
+      count: 2
+      delay: 0
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.step_results[0].status, StepStatus::Failed);
+        // Should have attempt info in stderr
+        assert!(result.step_results[0].stderr.contains("attempt 1/3"));
+        assert!(result.step_results[0].stderr.contains("attempt 3/3"));
+    }
+
+    #[test]
+    fn no_retry_on_success() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_retry_needed
+description: test
+steps:
+  - id: ok
+    type: cli
+    command: echo
+    args: ["success"]
+    retry:
+      count: 5
+      delay: 0
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        // Should run only once
+        assert!(result.step_results[0].stderr.is_empty());
+    }
+
+    #[test]
+    fn retry_with_on_fail_continue() {
+        let routine = Routine::from_yaml(
+            r#"
+name: retry_continue
+description: test
+steps:
+  - id: flaky
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+    retry:
+      count: 1
+      delay: 0
+    on_fail: continue
+  - id: after
+    type: cli
+    command: echo
+    args: ["still here"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.step_results[0].status, StepStatus::Failed);
+        assert_eq!(result.step_results[1].status, StepStatus::Success);
     }
 }

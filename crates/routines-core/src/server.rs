@@ -143,6 +143,10 @@ Step (common fields):
   when: String (optional) — condition; step skipped if false. Supports: A == B, A != B, truthy
   on_fail: stop|continue (default: stop) — error strategy; continue allows subsequent steps to run
   needs: list of String (default: []) — step IDs that must complete first. Enables parallel execution.
+  retry: object (optional) — retry on failure before triggering on_fail
+    count: integer (required) — max retries (total attempts = count + 1)
+    delay: integer (default: 1) — initial delay in seconds
+    backoff: fixed|exponential (default: fixed) — exponential doubles delay each retry
 
 Step (type: cli):
   command: String (required) — executable name or path
@@ -553,6 +557,13 @@ impl RoutinesMcpServer {
             }
             if !step.needs.is_empty() {
                 let _ = writeln!(out, "    needs: [{}]", step.needs.join(", "));
+            }
+            if let Some(retry) = &step.retry {
+                let _ = writeln!(
+                    out,
+                    "    retry: {}x, delay={}s, backoff={:?}",
+                    retry.count, retry.delay, retry.backoff
+                );
             }
         }
 
