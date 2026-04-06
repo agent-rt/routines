@@ -126,6 +126,7 @@ Routine YAML DSL Reference
 Top-level fields:
   name: String (required)
   description: String (required)
+  timeout: integer (optional) — max execution time for entire routine in seconds. Steps are skipped after deadline.
   strict_mode: bool (default: false) — blocks dangerous commands (rm -rf, mkfs, etc.)
   secrets_env: none|auto|list (default: none) — inject secrets as CLI subprocess env vars
     none: no injection (default). auto: all secrets as same-name env vars. list: only named secrets.
@@ -682,6 +683,11 @@ impl RoutinesMcpServer {
         // Show execution mode
         if routine.has_dag() {
             let _ = writeln!(out, "\nMode: parallel (DAG)");
+        }
+
+        // Show routine timeout
+        if let Some(timeout) = routine.routine_timeout {
+            let _ = writeln!(out, "\nRoutine timeout: {timeout}s");
         }
 
         // Show secrets_env config

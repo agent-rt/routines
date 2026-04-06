@@ -24,6 +24,9 @@ pub struct Routine {
     /// Secrets injection into CLI subprocess environment variables.
     #[serde(default)]
     pub secrets_env: SecretsEnv,
+    /// Maximum execution time for the entire routine in seconds.
+    #[serde(default, rename = "timeout")]
+    pub routine_timeout: Option<u64>,
 }
 
 /// Secrets injection mode for CLI subprocess environment variables.
@@ -974,6 +977,41 @@ steps:
             }
             other => panic!("expected SecretsEnv::List, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_routine_timeout() {
+        let routine = Routine::from_yaml(
+            r#"
+name: timed
+description: test
+timeout: 300
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.routine_timeout, Some(300));
+    }
+
+    #[test]
+    fn no_routine_timeout_is_none() {
+        let routine = Routine::from_yaml(
+            r#"
+name: untimed
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert!(routine.routine_timeout.is_none());
     }
 
     #[test]

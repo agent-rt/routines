@@ -140,10 +140,15 @@ pub(crate) fn run_routine_with_depth(
 
     let ctx = Context::new(resolved_inputs, secrets.clone());
 
+    // Compute routine-level deadline
+    let deadline = routine
+        .routine_timeout
+        .map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
+
     if routine.has_dag() {
-        run_dag(routine, ctx, secrets, routines_dir, depth)
+        run_dag(routine, ctx, secrets, routines_dir, depth, deadline)
     } else {
-        run_sequential(routine, ctx, secrets, routines_dir, depth)
+        run_sequential(routine, ctx, secrets, routines_dir, depth, deadline)
     }
 }
 
@@ -511,11 +516,35 @@ fn run_sequential(
     secrets: HashMap<String, String>,
     routines_dir: PathBuf,
     depth: u32,
+    deadline: Option<std::time::Instant>,
 ) -> Result<RunResult> {
     let mut step_results = Vec::new();
     let mut has_failure = false;
 
     for step in &routine.steps {
+        // Check routine-level deadline before each step
+        if let Some(dl) = deadline
+            && std::time::Instant::now() >= dl
+        {
+            step_results.push(StepResult {
+                step_id: step.id.clone(),
+                status: StepStatus::Failed,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("routine timeout exceeded ({}s)", routine.routine_timeout.unwrap_or(0)),
+                execution_time_ms: 0,
+            });
+            let run_status = RunStatus::Failed;
+            run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+            let output = resolve_output(routine, &ctx);
+            return Ok(RunResult {
+                status: run_status,
+                step_results,
+                output,
+                output_format: routine.output_format.clone(),
+            });
+        }
+
         let results =
             execute_step_with_foreach(step, routine, &mut ctx, &secrets, &routines_dir, depth)?;
 
@@ -538,6 +567,22 @@ fn run_sequential(
         }
 
         step_results.extend(results);
+
+        // Check routine-level deadline after step completes
+        if let Some(dl) = deadline
+            && std::time::Instant::now() >= dl
+            && !any_failed
+        {
+            let run_status = RunStatus::Failed;
+            run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+            let output = resolve_output(routine, &ctx);
+            return Ok(RunResult {
+                status: run_status,
+                step_results,
+                output,
+                output_format: routine.output_format.clone(),
+            });
+        }
 
         if any_failed {
             if step.on_fail == OnFail::Continue {
@@ -581,6 +626,7 @@ fn run_dag(
     secrets: HashMap<String, String>,
     routines_dir: PathBuf,
     depth: u32,
+    deadline: Option<std::time::Instant>,
 ) -> Result<RunResult> {
     let step_map: HashMap<&str, &Step> = routine.steps.iter().map(|s| (s.id.as_str(), s)).collect();
 
@@ -623,6 +669,13 @@ fn run_dag(
                 if comp.len() == routine.steps.len() {
                     break;
                 }
+            }
+
+            // Check routine-level deadline
+            if let Some(dl) = deadline
+                && std::time::Instant::now() >= dl
+            {
+                *aborted.lock().unwrap() = true;
             }
 
             // Check abort
@@ -1867,6 +1920,86 @@ steps:
         secrets.insert("MY_VAR".to_string(), "secret_value".to_string());
         let result = run_routine(&routine, HashMap::new(), secrets).unwrap();
         assert_eq!(result.step_results[0].stdout, "step_value"); // step env wins
+    }
+
+    #[test]
+    fn routine_timeout_aborts_remaining_steps() {
+        let routine = Routine::from_yaml(
+            r#"
+name: slow
+description: test
+timeout: 1
+steps:
+  - id: slow
+    type: cli
+    command: /bin/sh
+    args: ["-c", "sleep 2"]
+  - id: after
+    type: cli
+    command: echo
+    args: ["should not run"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        // The slow step may fail by step timeout or routine timeout;
+        // the 'after' step should be skipped with timeout message
+        let after_result = result.step_results.iter().find(|r| r.step_id == "after");
+        assert!(
+            after_result.is_none()
+                || after_result.unwrap().stderr.contains("routine timeout")
+        );
+    }
+
+    #[test]
+    fn routine_timeout_runs_finally() {
+        let routine = Routine::from_yaml(
+            r#"
+name: slow_with_finally
+description: test
+timeout: 1
+steps:
+  - id: slow
+    type: cli
+    command: /bin/sh
+    args: ["-c", "sleep 2"]
+finally:
+  - id: cleanup
+    type: cli
+    command: echo
+    args: ["cleaned"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        // Finally step should have run
+        let cleanup = result.step_results.iter().find(|r| r.step_id == "cleanup");
+        assert!(cleanup.is_some());
+        assert_eq!(cleanup.unwrap().status, StepStatus::Success);
+    }
+
+    #[test]
+    fn no_routine_timeout_no_limit() {
+        let routine = Routine::from_yaml(
+            r#"
+name: fast
+description: test
+steps:
+  - id: quick
+    type: cli
+    command: echo
+    args: ["done"]
+"#,
+        )
+        .unwrap();
+
+        assert!(routine.routine_timeout.is_none());
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
     }
 
     #[test]
