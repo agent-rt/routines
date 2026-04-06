@@ -38,6 +38,12 @@ pub struct Step {
     /// Optional content to pipe into the subprocess stdin.
     #[serde(default)]
     pub stdin: Option<String>,
+    /// Working directory for the subprocess. Supports template syntax.
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    /// Timeout in seconds. Step is killed and marked FAILED on expiry.
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

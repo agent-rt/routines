@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
@@ -142,11 +142,15 @@ fn execute_step(step: &Step, ctx: &Context, strict_mode: bool) -> Result<StepRes
         Some(tmpl) => Some(ctx.resolve(tmpl, &step.id)?),
         None => None,
     };
+    let working_dir = match &step.working_dir {
+        Some(tmpl) => Some(ctx.resolve(tmpl, &step.id)?),
+        None => None,
+    };
 
     let start = Instant::now();
 
-    let mut child = Command::new(&command)
-        .args(&args)
+    let mut cmd = Command::new(&command);
+    cmd.args(&args)
         .envs(&env)
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
@@ -154,15 +158,47 @@ fn execute_step(step: &Step, ctx: &Context, strict_mode: bool) -> Result<StepRes
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(RoutineError::Io)?;
+        .stderr(Stdio::piped());
+
+    if let Some(dir) = &working_dir {
+        cmd.current_dir(dir);
+    }
+
+    let mut child = cmd.spawn().map_err(RoutineError::Io)?;
 
     if let (Some(data), Some(mut stdin)) = (&stdin_data, child.stdin.take()) {
         stdin.write_all(data.as_bytes())?;
     }
 
-    let output = child.wait_with_output()?;
+    // Handle timeout via polling
+    let output = if let Some(timeout_secs) = step.timeout {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => break child.wait_with_output()?,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let elapsed = start.elapsed().as_millis() as u64;
+                        return Ok(StepResult {
+                            step_id: step.id.clone(),
+                            status: StepStatus::Failed,
+                            exit_code: None,
+                            stdout: String::new(),
+                            stderr: format!("Timed out after {timeout_secs}s"),
+                            execution_time_ms: elapsed,
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(RoutineError::Io(e)),
+            }
+        }
+    } else {
+        child.wait_with_output()?
+    };
+
     let elapsed = start.elapsed().as_millis() as u64;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

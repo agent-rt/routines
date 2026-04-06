@@ -186,8 +186,12 @@ fn cmd_log(run_id: &str) -> routines_core::error::Result<()> {
         } else {
             "FAIL"
         };
+        let tokens = match (step.stdout_tokens, step.stderr_tokens) {
+            (Some(out), Some(err)) => format!(", ~{}tok", out + err),
+            _ => String::new(),
+        };
         println!(
-            "\n[{icon}] Step {num}: {id}  (exit={exit}, {ms}ms)",
+            "\n[{icon}] Step {num}: {id}  (exit={exit}, {ms}ms{tokens})",
             num = i + 1,
             id = step.step_id,
             exit = step.exit_code.unwrap_or(-1),
@@ -206,6 +210,16 @@ fn cmd_log(run_id: &str) -> routines_core::error::Result<()> {
                 println!("  stderr: {trimmed}");
             }
         }
+    }
+
+    // Token summary
+    let total_tokens: i64 = log
+        .steps
+        .iter()
+        .map(|s| s.stdout_tokens.unwrap_or(0) + s.stderr_tokens.unwrap_or(0))
+        .sum();
+    if total_tokens > 0 {
+        println!("\nTotal output: ~{total_tokens} tokens (estimated)");
     }
 
     println!();

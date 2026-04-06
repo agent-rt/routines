@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use rmcp::handler::server::tool::ToolRouter;
@@ -6,7 +7,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::audit::AuditDb;
 use crate::executor::{self, RunStatus, StepStatus};
@@ -57,52 +58,16 @@ pub struct GetRunLogParams {
     pub run_id: String,
 }
 
-// --- Response structs ---
-
-#[derive(Debug, Serialize)]
-struct RoutineInfo {
-    name: String,
-    description: String,
-    inputs_schema: Vec<InputInfo>,
-}
-
-#[derive(Debug, Serialize)]
-struct InputInfo {
-    name: String,
-    required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    default: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct RunResponse {
-    run_id: String,
-    status: String,
-    steps_summary: Vec<StepSummary>,
-}
-
-#[derive(Debug, Serialize)]
-struct StepSummary {
-    step_id: String,
-    status: String,
-    exit_code: Option<i32>,
-    execution_time_ms: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateResponse {
-    success: bool,
-    path: String,
-}
-
 fn err_internal(msg: String) -> ErrorData {
     ErrorData::internal_error(msg, None)
 }
 
 fn err_params(msg: String) -> ErrorData {
     ErrorData::invalid_params(msg, None)
+}
+
+fn text_ok(text: String) -> Result<CallToolResult, ErrorData> {
+    Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
 #[tool_router]
@@ -116,12 +81,13 @@ impl RoutinesMcpServer {
     #[tool(description = "List all available routines with their input schemas")]
     async fn list_routines(&self) -> Result<CallToolResult, ErrorData> {
         let hub_dir = routines_dir().join("hub");
-        let mut routines = Vec::new();
+        let mut out = String::new();
 
         if hub_dir.exists() {
             let entries = std::fs::read_dir(&hub_dir)
                 .map_err(|e| err_internal(format!("Failed to read hub: {e}")))?;
 
+            let mut has_required = false;
             for entry in entries.flatten() {
                 let path: PathBuf = entry.path();
                 if path
@@ -129,27 +95,40 @@ impl RoutinesMcpServer {
                     .is_some_and(|ext| ext == "yml" || ext == "yaml")
                     && let Ok(routine) = Routine::from_file(&path)
                 {
-                    routines.push(RoutineInfo {
-                        name: routine.name,
-                        description: routine.description,
-                        inputs_schema: routine
+                    let inputs_desc = if routine.inputs.is_empty() {
+                        String::new()
+                    } else {
+                        let parts: Vec<String> = routine
                             .inputs
-                            .into_iter()
-                            .map(|i| InputInfo {
-                                name: i.name,
-                                required: i.required,
-                                default: i.default,
-                                description: i.description,
+                            .iter()
+                            .map(|i| {
+                                if i.required {
+                                    has_required = true;
+                                    format!("{}*", i.name)
+                                } else {
+                                    i.name.clone()
+                                }
                             })
-                            .collect(),
-                    });
+                            .collect();
+                        format!(" (inputs: {})", parts.join(", "))
+                    };
+                    let _ = writeln!(
+                        out,
+                        "{} — {}{}",
+                        routine.name, routine.description, inputs_desc
+                    );
                 }
+            }
+            if has_required {
+                let _ = write!(out, "(* = required)");
             }
         }
 
-        let json =
-            serde_json::to_string_pretty(&routines).map_err(|e| err_internal(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        if out.is_empty() {
+            out = "No routines found".to_string();
+        }
+
+        text_ok(out.trim().to_string())
     }
 
     #[tool(description = "Execute a routine by name with the given input parameters")]
@@ -172,6 +151,7 @@ impl RoutinesMcpServer {
             .map_err(|e| err_internal(format!("DB error: {e}")))?;
 
         let run_id = uuid::Uuid::new_v4().to_string();
+        let short_id = &run_id[..8];
         let started_at = chrono::Utc::now().to_rfc3339();
 
         let secret_values: Vec<&str> = secret_map.values().map(|s| s.as_str()).collect();
@@ -194,30 +174,60 @@ impl RoutinesMcpServer {
         db.finalize_run(&run_id, &result, &ended_at)
             .map_err(|e| err_internal(format!("DB finalize error: {e}")))?;
 
-        let response = RunResponse {
-            run_id,
-            status: match result.status {
-                RunStatus::Success => "SUCCESS".to_string(),
-                RunStatus::Failed => "FAILED".to_string(),
-            },
-            steps_summary: result
-                .step_results
-                .iter()
-                .map(|s| StepSummary {
-                    step_id: s.step_id.clone(),
-                    status: match s.status {
-                        StepStatus::Success => "SUCCESS".to_string(),
-                        StepStatus::Failed => "FAILED".to_string(),
-                    },
-                    exit_code: s.exit_code,
-                    execution_time_ms: s.execution_time_ms,
-                })
-                .collect(),
-        };
+        let total_ms: u64 = result
+            .step_results
+            .iter()
+            .map(|s| s.execution_time_ms)
+            .sum();
+        let total_steps = result.step_results.len();
 
-        let json =
-            serde_json::to_string_pretty(&response).map_err(|e| err_internal(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        let mut out = String::new();
+
+        match result.status {
+            RunStatus::Success => {
+                // Compact: one-line summary
+                let _ = write!(
+                    out,
+                    "run={short_id} SUCCESS {total_ms}ms {total_steps}/{total_steps} steps"
+                );
+            }
+            RunStatus::Failed => {
+                // Expand: show each step, with stderr on failed step
+                let failed_at = result
+                    .step_results
+                    .iter()
+                    .position(|s| s.status == StepStatus::Failed)
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let _ = writeln!(
+                    out,
+                    "run={short_id} FAILED at step {failed_at}/{total_steps}"
+                );
+                for step in &result.step_results {
+                    let icon = match step.status {
+                        StepStatus::Success => "OK",
+                        StepStatus::Failed => "FAIL",
+                    };
+                    let _ = writeln!(
+                        out,
+                        "[{icon}] {} exit={} {}ms",
+                        step.step_id,
+                        step.exit_code.unwrap_or(-1),
+                        step.execution_time_ms,
+                    );
+                    if step.status == StepStatus::Failed {
+                        let stderr = step.stderr.trim();
+                        if !stderr.is_empty() {
+                            for line in stderr.lines().take(10) {
+                                let _ = writeln!(out, "  {line}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        text_ok(out.trim().to_string())
     }
 
     #[tool(description = "Create a new routine from YAML. Validates the YAML before saving.")]
@@ -225,7 +235,6 @@ impl RoutinesMcpServer {
         &self,
         Parameters(params): Parameters<CreateRoutineParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Validate YAML parses correctly
         let _routine = Routine::from_yaml(&params.yaml_content)
             .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
 
@@ -237,14 +246,7 @@ impl RoutinesMcpServer {
         std::fs::write(&file_path, &params.yaml_content)
             .map_err(|e| err_internal(format!("Failed to write file: {e}")))?;
 
-        let response = CreateResponse {
-            success: true,
-            path: file_path.display().to_string(),
-        };
-
-        let json =
-            serde_json::to_string_pretty(&response).map_err(|e| err_internal(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        text_ok(format!("created {} → {}", params.name, file_path.display()))
     }
 
     #[tool(
@@ -261,14 +263,55 @@ impl RoutinesMcpServer {
             .get_run_log(&params.run_id)
             .map_err(|e| err_internal(format!("Query error: {e}")))?;
 
-        match log {
-            Some(run_log) => {
-                let json = serde_json::to_string_pretty(&run_log)
-                    .map_err(|e| err_internal(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(json)]))
-            }
-            None => Err(err_params(format!("Run '{}' not found", params.run_id))),
+        let Some(log) = log else {
+            return Err(err_params(format!("Run '{}' not found", params.run_id)));
+        };
+
+        // Same format as CLI `routines log`
+        let mut out = String::new();
+        let _ = writeln!(out, "Routine: {}", log.routine_name);
+        let _ = writeln!(out, "Run ID:  {}", log.run_id);
+        let _ = writeln!(out, "Status:  {}", log.status);
+        let _ = writeln!(out, "Started: {}", log.started_at);
+        if let Some(ended) = &log.ended_at {
+            let _ = writeln!(out, "Ended:   {ended}");
         }
+        if let Some(inputs) = &log.input_vars
+            && inputs != "{}"
+        {
+            let _ = writeln!(out, "Inputs:  {inputs}");
+        }
+        let _ = writeln!(out, "{}", "-".repeat(50));
+
+        for (i, step) in log.steps.iter().enumerate() {
+            let icon = if step.status == "SUCCESS" {
+                "OK"
+            } else {
+                "FAIL"
+            };
+            let _ = writeln!(
+                out,
+                "[{icon}] Step {}: {} exit={} {}ms",
+                i + 1,
+                step.step_id,
+                step.exit_code.unwrap_or(-1),
+                step.execution_time_ms,
+            );
+            if let Some(stdout) = &step.stdout {
+                let trimmed = stdout.trim();
+                if !trimmed.is_empty() {
+                    let _ = writeln!(out, "  stdout: {trimmed}");
+                }
+            }
+            if let Some(stderr) = &step.stderr {
+                let trimmed = stderr.trim();
+                if !trimmed.is_empty() {
+                    let _ = writeln!(out, "  stderr: {trimmed}");
+                }
+            }
+        }
+
+        text_ok(out.trim().to_string())
     }
 }
 
@@ -279,9 +322,9 @@ impl ServerHandler for RoutinesMcpServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("routines", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Routines: deterministic workflow orchestration engine for AI agents. \
-             Use list_routines to discover available workflows, run_routine to execute, \
-             create_routine to define new ones, and get_run_log to inspect execution history."
+            "Routines: deterministic workflow engine for AI agents. \
+             list_routines → discover, run_routine → execute, \
+             create_routine → define, get_run_log → inspect."
                 .into(),
         );
         info

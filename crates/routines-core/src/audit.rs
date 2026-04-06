@@ -24,8 +24,16 @@ CREATE TABLE IF NOT EXISTS step_logs (
     stderr            TEXT,
     input_vars        TEXT,
     execution_time_ms INTEGER NOT NULL,
-    started_at        TEXT NOT NULL
+    started_at        TEXT NOT NULL,
+    stdout_tokens     INTEGER,
+    stderr_tokens     INTEGER
 );
+";
+
+const MIGRATIONS: &str = "
+-- Add token columns if missing (idempotent)
+ALTER TABLE step_logs ADD COLUMN stdout_tokens INTEGER;
+ALTER TABLE step_logs ADD COLUMN stderr_tokens INTEGER;
 ";
 
 /// Audit database backed by SQLite.
@@ -41,6 +49,13 @@ impl AuditDb {
         }
         let conn = Connection::open(db_path)?;
         conn.execute_batch(SCHEMA)?;
+        // Run migrations (ignore errors for already-existing columns)
+        for line in MIGRATIONS.lines() {
+            let line = line.trim();
+            if line.starts_with("ALTER") {
+                let _ = conn.execute_batch(line);
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -81,10 +96,12 @@ impl AuditDb {
         };
         let stdout = secrets::redact(&step.stdout, secret_values);
         let stderr = secrets::redact(&step.stderr, secret_values);
+        let stdout_tokens = (stdout.len() / 4) as i64;
+        let stderr_tokens = (stderr.len() / 4) as i64;
 
         self.conn.execute(
-            "INSERT INTO step_logs (id, run_id, step_id, status, exit_code, stdout, stderr, input_vars, execution_time_ms, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![id, run_id, step.step_id, status, step.exit_code, stdout, stderr, "", step.execution_time_ms, started_at],
+            "INSERT INTO step_logs (id, run_id, step_id, status, exit_code, stdout, stderr, input_vars, execution_time_ms, started_at, stdout_tokens, stderr_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![id, run_id, step.step_id, status, step.exit_code, stdout, stderr, "", step.execution_time_ms, started_at, stdout_tokens, stderr_tokens],
         )?;
         Ok(())
     }
@@ -123,7 +140,7 @@ impl AuditDb {
 
         if let Some(mut run) = run {
             let mut stmt = self.conn.prepare(
-                "SELECT step_id, status, exit_code, stdout, stderr, execution_time_ms, started_at FROM step_logs WHERE run_id = ?1 ORDER BY started_at",
+                "SELECT step_id, status, exit_code, stdout, stderr, execution_time_ms, started_at, stdout_tokens, stderr_tokens FROM step_logs WHERE run_id = ?1 ORDER BY started_at",
             )?;
             let steps = stmt.query_map(rusqlite::params![run_id], |row| {
                 Ok(StepLog {
@@ -134,6 +151,8 @@ impl AuditDb {
                     stderr: row.get(4)?,
                     execution_time_ms: row.get(5)?,
                     started_at: row.get(6)?,
+                    stdout_tokens: row.get(7).unwrap_or(None),
+                    stderr_tokens: row.get(8).unwrap_or(None),
                 })
             })?;
             for step in steps {
@@ -168,4 +187,6 @@ pub struct StepLog {
     pub stderr: Option<String>,
     pub execution_time_ms: i64,
     pub started_at: String,
+    pub stdout_tokens: Option<i64>,
+    pub stderr_tokens: Option<i64>,
 }
