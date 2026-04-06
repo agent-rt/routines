@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::audit::AuditDb;
 use crate::executor::{self, RunStatus, StepStatus};
-use crate::parser::Routine;
+use crate::parser::{Routine, StepAction};
 use crate::secrets;
 
 fn routines_dir() -> PathBuf {
@@ -100,7 +100,7 @@ InputDef:
 
 Step (common fields):
   id: String (required) — unique identifier, used in {{ step_id.stdout }}
-  type: cli|api (required)
+  type: cli|http (required)
   timeout: integer (optional) — seconds before step is killed
   when: String (optional) — condition; step skipped if false. Supports: A == B, A != B, truthy
   on_fail: stop|continue (default: stop) — error strategy; continue allows subsequent steps to run
@@ -112,7 +112,7 @@ Step (type: cli):
   stdin: String (optional) — content piped to subprocess stdin
   working_dir: String (optional) — working directory for subprocess
 
-Step (type: api):
+Step (type: http):
   url: String (required) — HTTP URL, supports templates
   method: String (default: GET) — HTTP method
   headers: map of String→String (default: {}) — request headers, supports templates
@@ -293,13 +293,18 @@ impl RoutinesMcpServer {
         let mut out = String::new();
 
         for (i, step) in routine.steps.iter().enumerate() {
-            match step.step_type {
-                crate::parser::StepType::Cli => {
-                    let command = ctx
-                        .resolve(step.command.as_deref().unwrap_or_default(), &step.id)
+            match &step.action {
+                StepAction::Cli {
+                    command,
+                    args,
+                    env,
+                    stdin,
+                    working_dir,
+                } => {
+                    let cmd = ctx
+                        .resolve(command, &step.id)
                         .unwrap_or_else(|e| format!("<error: {e}>"));
-                    let args: Vec<String> = step
-                        .args
+                    let resolved_args: Vec<String> = args
                         .iter()
                         .map(|a| {
                             ctx.resolve(a, &step.id)
@@ -311,36 +316,68 @@ impl RoutinesMcpServer {
                         "[{}] {}: {} {}",
                         i + 1,
                         step.id,
-                        command,
-                        args.join(" ")
+                        cmd,
+                        resolved_args.join(" ")
                     );
-                }
-                crate::parser::StepType::Api => {
-                    let url = ctx
-                        .resolve(step.url.as_deref().unwrap_or_default(), &step.id)
-                        .unwrap_or_else(|e| format!("<error: {e}>"));
-                    let method = ctx
-                        .resolve(&step.method, &step.id)
-                        .unwrap_or_else(|e| format!("<error: {e}>"));
-                    let _ = writeln!(out, "[{}] {}: {} {}", i + 1, step.id, method, url);
-                    if !step.headers.is_empty() {
-                        let hdr_parts: Vec<String> = step
-                            .headers
+                    if !env.is_empty() {
+                        let env_parts: Vec<String> = env
                             .iter()
                             .map(|(k, v)| {
                                 let resolved = ctx
                                     .resolve(v, &step.id)
                                     .unwrap_or_else(|e| format!("<error: {e}>"));
-                                format!("{k}: {resolved}")
+                                format!("{k}={resolved}")
                             })
                             .collect();
-                        for h in &hdr_parts {
-                            let _ = writeln!(out, "    header: {h}");
-                        }
+                        let _ = writeln!(out, "    env: {}", env_parts.join(" "));
                     }
-                    if let Some(body_tmpl) = &step.body {
+                    if let Some(s) = stdin {
                         let resolved = ctx
-                            .resolve(body_tmpl, &step.id)
+                            .resolve(s, &step.id)
+                            .unwrap_or_else(|e| format!("<error: {e}>"));
+                        let preview = if resolved.len() > 80 {
+                            format!("{}...", &resolved[..80])
+                        } else {
+                            resolved
+                        };
+                        let _ = writeln!(out, "    stdin: {preview}");
+                    }
+                    if let Some(dir) = working_dir {
+                        let resolved = ctx
+                            .resolve(dir, &step.id)
+                            .unwrap_or_else(|e| format!("<error: {e}>"));
+                        let _ = writeln!(out, "    working_dir: {resolved}");
+                    }
+                }
+                StepAction::Http {
+                    url,
+                    method,
+                    headers,
+                    body,
+                } => {
+                    let resolved_url = ctx
+                        .resolve(url, &step.id)
+                        .unwrap_or_else(|e| format!("<error: {e}>"));
+                    let resolved_method = ctx
+                        .resolve(method, &step.id)
+                        .unwrap_or_else(|e| format!("<error: {e}>"));
+                    let _ = writeln!(
+                        out,
+                        "[{}] {}: {} {}",
+                        i + 1,
+                        step.id,
+                        resolved_method,
+                        resolved_url
+                    );
+                    for (k, v) in headers {
+                        let resolved = ctx
+                            .resolve(v, &step.id)
+                            .unwrap_or_else(|e| format!("<error: {e}>"));
+                        let _ = writeln!(out, "    header: {k}: {resolved}");
+                    }
+                    if let Some(b) = body {
+                        let resolved = ctx
+                            .resolve(b, &step.id)
                             .unwrap_or_else(|e| format!("<error: {e}>"));
                         let preview = if resolved.len() > 120 {
                             format!("{}...", &resolved[..120])
@@ -360,36 +397,6 @@ impl RoutinesMcpServer {
             }
             if step.on_fail == crate::parser::OnFail::Continue {
                 let _ = writeln!(out, "    on_fail: continue");
-            }
-            if !step.env.is_empty() {
-                let env_parts: Vec<String> = step
-                    .env
-                    .iter()
-                    .map(|(k, v)| {
-                        let resolved = ctx
-                            .resolve(v, &step.id)
-                            .unwrap_or_else(|e| format!("<error: {e}>"));
-                        format!("{k}={resolved}")
-                    })
-                    .collect();
-                let _ = writeln!(out, "    env: {}", env_parts.join(" "));
-            }
-            if let Some(stdin) = &step.stdin {
-                let resolved = ctx
-                    .resolve(stdin, &step.id)
-                    .unwrap_or_else(|e| format!("<error: {e}>"));
-                let preview = if resolved.len() > 80 {
-                    format!("{}...", &resolved[..80])
-                } else {
-                    resolved
-                };
-                let _ = writeln!(out, "    stdin: {preview}");
-            }
-            if let Some(dir) = &step.working_dir {
-                let resolved = ctx
-                    .resolve(dir, &step.id)
-                    .unwrap_or_else(|e| format!("<error: {e}>"));
-                let _ = writeln!(out, "    working_dir: {resolved}");
             }
             if let Some(timeout) = step.timeout {
                 let _ = writeln!(out, "    timeout: {timeout}s");

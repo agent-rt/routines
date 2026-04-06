@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A complete Routine definition parsed from YAML.
@@ -24,40 +26,13 @@ pub struct InputDef {
     pub description: Option<String>,
 }
 
-/// A single execution step.
+/// A single execution step with type-safe action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
-    #[serde(rename = "type")]
-    pub step_type: StepType,
-    // --- CLI fields ---
-    /// Executable name or path (required for cli, unused for api).
-    #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
-    /// Optional content to pipe into the subprocess stdin.
-    #[serde(default)]
-    pub stdin: Option<String>,
-    /// Working directory for the subprocess. Supports template syntax.
-    #[serde(default)]
-    pub working_dir: Option<String>,
-    // --- API fields ---
-    /// HTTP URL (required for api). Supports template syntax.
-    #[serde(default)]
-    pub url: Option<String>,
-    /// HTTP method (default: GET).
-    #[serde(default = "default_method")]
-    pub method: String,
-    /// HTTP request headers. Supports template syntax in values.
-    #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
-    /// HTTP request body. Supports template syntax.
-    #[serde(default)]
-    pub body: Option<String>,
-    // --- Common fields ---
+    /// Type-specific action (cli or http), flattened into step fields.
+    #[serde(flatten)]
+    pub action: StepAction,
     /// Timeout in seconds. Step is killed and marked FAILED on expiry.
     #[serde(default)]
     pub timeout: Option<u64>,
@@ -69,6 +44,32 @@ pub struct Step {
     pub on_fail: OnFail,
 }
 
+/// Type-discriminated step action. Determines which fields are required.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum StepAction {
+    Cli {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        #[serde(default)]
+        stdin: Option<String>,
+        #[serde(default)]
+        working_dir: Option<String>,
+    },
+    Http {
+        url: String,
+        #[serde(default = "default_method")]
+        method: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        #[serde(default)]
+        body: Option<String>,
+    },
+}
+
 fn default_method() -> String {
     "GET".to_string()
 }
@@ -77,51 +78,16 @@ fn default_method() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OnFail {
-    /// Stop the entire run on failure (default).
     #[default]
     Stop,
-    /// Record failure but continue executing subsequent steps.
     Continue,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum StepType {
-    Cli,
-    Api,
 }
 
 impl Routine {
     /// Parse a Routine from a YAML string.
     pub fn from_yaml(yaml: &str) -> crate::error::Result<Self> {
         let routine: Routine = serde_yaml::from_str(yaml)?;
-        routine.validate()?;
         Ok(routine)
-    }
-
-    /// Semantic validation after deserialization.
-    fn validate(&self) -> crate::error::Result<()> {
-        for step in &self.steps {
-            match step.step_type {
-                StepType::Cli => {
-                    if step.command.is_none() {
-                        return Err(crate::error::RoutineError::Validation(format!(
-                            "step '{}': type=cli requires 'command' field",
-                            step.id
-                        )));
-                    }
-                }
-                StepType::Api => {
-                    if step.url.is_none() {
-                        return Err(crate::error::RoutineError::Validation(format!(
-                            "step '{}': type=api requires 'url' field",
-                            step.id
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Parse a Routine from a YAML file.
@@ -146,7 +112,10 @@ mod tests {
         assert!(!routine.inputs[1].required);
         assert_eq!(routine.inputs[1].default.as_deref(), Some("latest"));
         // Check env on upload step
-        assert!(routine.steps[1].env.contains_key("AWS_ACCESS_KEY_ID"));
+        match &routine.steps[1].action {
+            StepAction::Cli { env, .. } => assert!(env.contains_key("AWS_ACCESS_KEY_ID")),
+            _ => panic!("expected cli step"),
+        }
     }
 
     #[test]
@@ -155,8 +124,74 @@ mod tests {
         let routine = Routine::from_yaml(yaml).unwrap();
         assert_eq!(routine.name, "summarize_pr");
         assert_eq!(routine.steps.len(), 3);
-        // extract_info step should have stdin field
-        assert!(routine.steps[1].stdin.is_some());
-        assert_eq!(routine.steps[1].command.as_deref(), Some("jq"));
+        match &routine.steps[1].action {
+            StepAction::Cli { stdin, command, .. } => {
+                assert!(stdin.is_some());
+                assert_eq!(command, "jq");
+            }
+            _ => panic!("expected cli step"),
+        }
+    }
+
+    #[test]
+    fn parse_http_step() {
+        let routine = Routine::from_yaml(
+            r#"
+name: http_test
+description: test
+steps:
+  - id: fetch
+    type: http
+    url: "https://example.com/api"
+    method: POST
+    headers:
+      Authorization: "Bearer token"
+    body: '{"key": "value"}'
+"#,
+        )
+        .unwrap();
+
+        match &routine.steps[0].action {
+            StepAction::Http {
+                url,
+                method,
+                headers,
+                body,
+            } => {
+                assert_eq!(url, "https://example.com/api");
+                assert_eq!(method, "POST");
+                assert!(headers.contains_key("Authorization"));
+                assert!(body.is_some());
+            }
+            _ => panic!("expected http step"),
+        }
+    }
+
+    #[test]
+    fn cli_without_command_fails() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad
+description: test
+steps:
+  - id: no_cmd
+    type: cli
+"#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn http_without_url_fails() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad
+description: test
+steps:
+  - id: no_url
+    type: http
+"#,
+        );
+        assert!(result.is_err());
     }
 }

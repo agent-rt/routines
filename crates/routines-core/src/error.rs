@@ -26,9 +26,6 @@ pub enum RoutineError {
     #[error("Dangerous command blocked in strict_mode: '{command}' in step '{step_id}'")]
     DangerousCommand { step_id: String, command: String },
 
-    #[error("Validation error: {0}")]
-    Validation(String),
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
