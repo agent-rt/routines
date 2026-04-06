@@ -129,6 +129,7 @@ Top-level fields:
   strict_mode: bool (default: false) — blocks dangerous commands (rm -rf, mkfs, etc.)
   inputs: list of InputDef (default: [])
   steps: list of Step (required)
+  finally: list of Step (default: []) — cleanup steps, always run after main steps regardless of success/failure
 
 InputDef:
   name: String (required)
@@ -180,6 +181,7 @@ Template syntax:
   {{ step_id.stdout_lines }} — stdout split by newline as JSON array (for use with for_each)
   {{ item }}                 — current iteration value (inside for_each)
   {{ item_index }}           — current iteration index, 0-based (inside for_each)
+  {{ _run.status }}          — run status: SUCCESS or FAILED (available in finally block)
 
 Example:
   name: greet
@@ -587,6 +589,32 @@ impl RoutinesMcpServer {
         // Show execution mode
         if routine.has_dag() {
             let _ = writeln!(out, "\nMode: parallel (DAG)");
+        }
+
+        // Show finally block
+        if !routine.finally.is_empty() {
+            let _ = writeln!(out, "\nFinally ({} steps):", routine.finally.len());
+            for (i, step) in routine.finally.iter().enumerate() {
+                match &step.action {
+                    StepAction::Cli { command, args, .. } => {
+                        let cmd = ctx.resolve(command, &step.id).unwrap_or_else(|e| format!("<error: {e}>"));
+                        let resolved_args: Vec<String> = args.iter().map(|a| ctx.resolve(a, &step.id).unwrap_or_else(|e| format!("<error: {e}>"))).collect();
+                        let _ = writeln!(out, "  [F{}] {}: {} {}", i + 1, step.id, cmd, resolved_args.join(" "));
+                    }
+                    StepAction::Http { url, method, .. } => {
+                        let _ = writeln!(out, "  [F{}] {}: {} {}", i + 1, step.id, method, url);
+                    }
+                    StepAction::Routine { name, .. } => {
+                        let _ = writeln!(out, "  [F{}] {}: routine {}", i + 1, step.id, name);
+                    }
+                    StepAction::Mcp { server, tool, .. } => {
+                        let _ = writeln!(out, "  [F{}] {}: mcp {}:{}", i + 1, step.id, server, tool);
+                    }
+                }
+                if let Some(when_expr) = &step.when {
+                    let _ = writeln!(out, "      when: {when_expr}");
+                }
+            }
         }
 
         text_ok(out.trim().to_string())

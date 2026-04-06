@@ -12,6 +12,9 @@ pub struct Routine {
     pub steps: Vec<Step>,
     #[serde(default)]
     pub strict_mode: bool,
+    /// Cleanup steps that always execute after main steps, regardless of success/failure.
+    #[serde(default)]
+    pub finally: Vec<Step>,
 }
 
 /// Input parameter declaration.
@@ -159,8 +162,19 @@ impl Routine {
     }
 
     /// Validate the step dependency graph: no self-refs, all refs exist, no cycles.
+    /// Also checks that finally step IDs don't collide with main step IDs.
     fn validate_dag(&self) -> crate::error::Result<()> {
         let step_ids: HashSet<&str> = self.steps.iter().map(|s| s.id.as_str()).collect();
+
+        // Check finally step IDs don't collide with main step IDs
+        for step in &self.finally {
+            if step_ids.contains(step.id.as_str()) {
+                return Err(crate::error::RoutineError::InvalidNeeds {
+                    step_id: step.id.clone(),
+                    reason: "finally step ID conflicts with main step ID".to_string(),
+                });
+            }
+        }
 
         for step in &self.steps {
             for dep in &step.needs {
@@ -610,5 +624,72 @@ steps:
         .unwrap();
 
         assert!(routine.steps[0].for_each.is_none());
+    }
+
+    #[test]
+    fn parse_finally_block() {
+        let routine = Routine::from_yaml(
+            r#"
+name: with_finally
+description: test
+steps:
+  - id: deploy
+    type: cli
+    command: echo
+    args: ["deploying"]
+finally:
+  - id: cleanup
+    type: cli
+    command: echo
+    args: ["cleaning up"]
+  - id: notify
+    type: cli
+    command: echo
+    args: ["done"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.steps.len(), 1);
+        assert_eq!(routine.finally.len(), 2);
+        assert_eq!(routine.finally[0].id, "cleanup");
+        assert_eq!(routine.finally[1].id, "notify");
+    }
+
+    #[test]
+    fn no_finally_is_empty() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_finally
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert!(routine.finally.is_empty());
+    }
+
+    #[test]
+    fn finally_id_collision_fails() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad
+description: test
+steps:
+  - id: deploy
+    type: cli
+    command: echo
+finally:
+  - id: deploy
+    type: cli
+    command: echo
+"#,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("conflicts"));
     }
 }

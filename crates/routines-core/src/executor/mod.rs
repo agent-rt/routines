@@ -391,6 +391,63 @@ fn execute_step_with_foreach(
     Ok(results)
 }
 
+/// Execute finally steps sequentially. Always runs, regardless of main step results.
+/// Finally step failures are recorded but do not change the run status.
+fn run_finally(
+    routine: &Routine,
+    ctx: &mut Context,
+    secrets: &HashMap<String, String>,
+    routines_dir: &PathBuf,
+    depth: u32,
+    run_status: &RunStatus,
+    step_results: &mut Vec<StepResult>,
+) {
+    if routine.finally.is_empty() {
+        return;
+    }
+
+    // Inject _run.status
+    let status_str = match run_status {
+        RunStatus::Success => "SUCCESS",
+        RunStatus::Failed => "FAILED",
+    };
+    ctx.set_run_status(status_str);
+
+    for step in &routine.finally {
+        let results = execute_step_with_foreach(step, routine, ctx, secrets, routines_dir, depth);
+
+        match results {
+            Ok(results) => {
+                // Update context for subsequent finally steps
+                if step.for_each.is_none()
+                    && let Some(result) = results.first()
+                {
+                    ctx.add_step_output(
+                        step.id.clone(),
+                        StepOutput {
+                            stdout: result.stdout.trim().to_string(),
+                            stderr: result.stderr.trim().to_string(),
+                            exit_code: result.exit_code,
+                        },
+                    );
+                }
+                step_results.extend(results);
+            }
+            Err(e) => {
+                // Record error but continue with remaining finally steps
+                step_results.push(StepResult {
+                    step_id: step.id.clone(),
+                    status: StepStatus::Failed,
+                    exit_code: Some(1),
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                    execution_time_ms: 0,
+                });
+            }
+        }
+    }
+}
+
 /// Sequential execution path (no `needs` declared — original behavior).
 fn run_sequential(
     routine: &Routine,
@@ -430,20 +487,27 @@ fn run_sequential(
             if step.on_fail == OnFail::Continue {
                 has_failure = true;
             } else {
+                // Run finally before returning
+                let run_status = RunStatus::Failed;
+                run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
                 return Ok(RunResult {
-                    status: RunStatus::Failed,
+                    status: run_status,
                     step_results,
                 });
             }
         }
     }
 
+    let run_status = if has_failure {
+        RunStatus::Failed
+    } else {
+        RunStatus::Success
+    };
+
+    run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+
     Ok(RunResult {
-        status: if has_failure {
-            RunStatus::Failed
-        } else {
-            RunStatus::Success
-        },
+        status: run_status,
         step_results,
     })
 }
@@ -657,12 +721,20 @@ fn run_dag(
         }
     }
 
+    let run_status = if has_failure || was_aborted {
+        RunStatus::Failed
+    } else {
+        RunStatus::Success
+    };
+
+    // Run finally steps (need mutable context)
+    let mut ctx = Arc::try_unwrap(ctx)
+        .map(|m| m.into_inner().unwrap())
+        .unwrap_or_else(|arc| arc.lock().unwrap().clone());
+    run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+
     Ok(RunResult {
-        status: if has_failure || was_aborted {
-            RunStatus::Failed
-        } else {
-            RunStatus::Success
-        },
+        status: run_status,
         step_results,
     })
 }
@@ -1429,5 +1501,166 @@ steps:
         assert_eq!(result.status, RunStatus::Success);
         // check step should see the last iteration's stdout
         assert!(result.step_results.last().unwrap().stdout.contains("prev=last"));
+    }
+
+    #[test]
+    fn finally_runs_on_success() {
+        let routine = Routine::from_yaml(
+            r#"
+name: finally_success
+description: test
+steps:
+  - id: main
+    type: cli
+    command: echo
+    args: ["main"]
+finally:
+  - id: cleanup
+    type: cli
+    command: echo
+    args: ["cleanup ran"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results.len(), 2);
+        assert!(result.step_results[1].stdout.contains("cleanup ran"));
+    }
+
+    #[test]
+    fn finally_runs_on_failure() {
+        let routine = Routine::from_yaml(
+            r#"
+name: finally_failure
+description: test
+steps:
+  - id: fail
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+finally:
+  - id: cleanup
+    type: cli
+    command: echo
+    args: ["cleanup after fail"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        // Main step + finally step
+        assert_eq!(result.step_results.len(), 2);
+        assert_eq!(result.step_results[0].status, StepStatus::Failed);
+        assert_eq!(result.step_results[1].status, StepStatus::Success);
+        assert!(result.step_results[1].stdout.contains("cleanup after fail"));
+    }
+
+    #[test]
+    fn finally_run_status_variable() {
+        let routine = Routine::from_yaml(
+            r#"
+name: finally_status
+description: test
+steps:
+  - id: fail
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+finally:
+  - id: only_on_fail
+    type: cli
+    command: echo
+    args: ["rollback"]
+    when: "{{ _run.status }} == FAILED"
+  - id: only_on_success
+    type: cli
+    command: echo
+    args: ["celebrate"]
+    when: "{{ _run.status }} == SUCCESS"
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        // fail + only_on_fail (executed) + only_on_success (skipped)
+        assert_eq!(result.step_results.len(), 3);
+        assert!(result.step_results[1].stdout.contains("rollback"));
+        assert_eq!(result.step_results[2].status, StepStatus::Skipped);
+    }
+
+    #[test]
+    fn finally_failure_does_not_change_run_status() {
+        let routine = Routine::from_yaml(
+            r#"
+name: finally_fail
+description: test
+steps:
+  - id: main
+    type: cli
+    command: echo
+    args: ["ok"]
+finally:
+  - id: bad_cleanup
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        // Run status stays SUCCESS even though finally step failed
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results[0].status, StepStatus::Success);
+        assert_eq!(result.step_results[1].status, StepStatus::Failed);
+    }
+
+    #[test]
+    fn no_finally_behavior_unchanged() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_finally
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+    args: ["hello"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results.len(), 1);
+    }
+
+    #[test]
+    fn finally_accesses_step_output() {
+        let routine = Routine::from_yaml(
+            r#"
+name: finally_ctx
+description: test
+steps:
+  - id: compute
+    type: cli
+    command: echo
+    args: ["42"]
+finally:
+  - id: report
+    type: cli
+    command: echo
+    args: ["result={{ compute.stdout }}"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert!(result.step_results[1].stdout.contains("result=42"));
     }
 }

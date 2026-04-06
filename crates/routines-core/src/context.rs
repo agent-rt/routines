@@ -10,6 +10,8 @@ pub struct Context {
     step_outputs: HashMap<String, StepOutput>,
     /// Temporary iteration variables: `item` and `item_index`.
     iteration: Option<IterationVars>,
+    /// Run status for finally blocks: "SUCCESS" or "FAILED".
+    run_status: Option<String>,
 }
 
 /// Variables injected during a for_each iteration.
@@ -34,7 +36,13 @@ impl Context {
             secrets,
             step_outputs: HashMap::new(),
             iteration: None,
+            run_status: None,
         }
+    }
+
+    /// Set the run status for use in finally blocks.
+    pub fn set_run_status(&mut self, status: &str) {
+        self.run_status = Some(status.to_string());
     }
 
     /// Set iteration variables for a for_each loop. Returns previous value for restoration.
@@ -133,6 +141,19 @@ impl Context {
                         key: key.to_string(),
                     })
             }
+            "_run" => match suffix {
+                "status" => self
+                    .run_status
+                    .clone()
+                    .ok_or_else(|| RoutineError::UndefinedVariable {
+                        step_id: current_step_id.to_string(),
+                        key: key.to_string(),
+                    }),
+                _ => Err(RoutineError::UndefinedVariable {
+                    step_id: current_step_id.to_string(),
+                    key: key.to_string(),
+                }),
+            },
             _ => {
                 // Treat prefix as a step_id
                 let output = self
@@ -246,5 +267,19 @@ mod tests {
         let ctx = Context::new(HashMap::new(), HashMap::new());
         let err = ctx.resolve("{{ item }}", "test").unwrap_err();
         assert!(err.to_string().contains("item"));
+    }
+
+    #[test]
+    fn resolve_run_status() {
+        let mut ctx = Context::new(HashMap::new(), HashMap::new());
+        ctx.set_run_status("FAILED");
+        assert_eq!(ctx.resolve("{{ _run.status }}", "test").unwrap(), "FAILED");
+    }
+
+    #[test]
+    fn run_status_unset_errors() {
+        let ctx = Context::new(HashMap::new(), HashMap::new());
+        let err = ctx.resolve("{{ _run.status }}", "test").unwrap_err();
+        assert!(err.to_string().contains("_run.status"));
     }
 }
