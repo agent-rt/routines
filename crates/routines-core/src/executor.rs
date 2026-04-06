@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
-use crate::parser::{OnFail, Routine, Step};
+use crate::parser::{OnFail, Routine, Step, StepType};
 
 /// Result of executing a single step.
 #[derive(Debug, Clone)]
@@ -140,7 +140,10 @@ pub fn run_routine(
             }
         }
 
-        let result = execute_step(step, &ctx, routine.strict_mode)?;
+        let result = match step.step_type {
+            StepType::Cli => execute_cli_step(step, &ctx, routine.strict_mode)?,
+            StepType::Api => execute_api_step(step, &ctx)?,
+        };
 
         let status = result.status.clone();
         ctx.add_step_output(
@@ -176,8 +179,9 @@ pub fn run_routine(
 }
 
 /// Execute a single CLI step.
-fn execute_step(step: &Step, ctx: &Context, strict_mode: bool) -> Result<StepResult> {
-    let command = ctx.resolve(&step.command, &step.id)?;
+fn execute_cli_step(step: &Step, ctx: &Context, strict_mode: bool) -> Result<StepResult> {
+    let command_template = step.command.as_deref().unwrap_or_default();
+    let command = ctx.resolve(command_template, &step.id)?;
     let args: Vec<String> = step
         .args
         .iter()
@@ -280,6 +284,150 @@ fn execute_step(step: &Step, ctx: &Context, strict_mode: bool) -> Result<StepRes
         stderr,
         execution_time_ms: elapsed,
     })
+}
+
+/// Execute a single API (HTTP) step.
+fn execute_api_step(step: &Step, ctx: &Context) -> Result<StepResult> {
+    let url_template = step.url.as_deref().unwrap_or_default();
+    let url = ctx.resolve(url_template, &step.id)?;
+    let method = ctx.resolve(&step.method, &step.id)?;
+
+    let start = Instant::now();
+
+    // Build agent with timeout
+    let config = if let Some(timeout_secs) = step.timeout {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(timeout_secs)))
+            .build()
+    } else {
+        ureq::config::Config::default()
+    };
+    let agent = ureq::Agent::new_with_config(config);
+
+    // Resolve headers
+    let mut resolved_headers: Vec<(String, String)> = Vec::new();
+    for (key, val_template) in &step.headers {
+        let val = ctx.resolve(val_template, &step.id)?;
+        resolved_headers.push((key.clone(), val));
+    }
+
+    // Resolve body
+    let body_data = match &step.body {
+        Some(tmpl) => Some(ctx.resolve(tmpl, &step.id)?),
+        None => None,
+    };
+
+    // Build and send request
+    let send_result = (|| -> std::result::Result<(u16, String), ureq::Error> {
+        let method_upper = method.to_uppercase();
+
+        // Build request using method dispatch
+        macro_rules! build_req {
+            ($builder:expr) => {{
+                let mut req = $builder;
+                for (k, v) in &resolved_headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                req
+            }};
+        }
+
+        let (status_code, body) = match method_upper.as_str() {
+            "POST" => {
+                let req = build_req!(agent.post(&url));
+                let mut resp = if let Some(b) = &body_data {
+                    req.send(b.as_bytes())?
+                } else {
+                    req.send_empty()?
+                };
+                (
+                    resp.status(),
+                    resp.body_mut().read_to_string().unwrap_or_default(),
+                )
+            }
+            "PUT" => {
+                let req = build_req!(agent.put(&url));
+                let mut resp = if let Some(b) = &body_data {
+                    req.send(b.as_bytes())?
+                } else {
+                    req.send_empty()?
+                };
+                (
+                    resp.status(),
+                    resp.body_mut().read_to_string().unwrap_or_default(),
+                )
+            }
+            "PATCH" => {
+                let req = build_req!(agent.patch(&url));
+                let mut resp = if let Some(b) = &body_data {
+                    req.send(b.as_bytes())?
+                } else {
+                    req.send_empty()?
+                };
+                (
+                    resp.status(),
+                    resp.body_mut().read_to_string().unwrap_or_default(),
+                )
+            }
+            "DELETE" => {
+                let req = build_req!(agent.delete(&url));
+                let mut resp = req.call()?;
+                (
+                    resp.status(),
+                    resp.body_mut().read_to_string().unwrap_or_default(),
+                )
+            }
+            "HEAD" => {
+                let req = build_req!(agent.head(&url));
+                let mut resp = req.call()?;
+                (
+                    resp.status(),
+                    resp.body_mut().read_to_string().unwrap_or_default(),
+                )
+            }
+            _ => {
+                // Default to GET
+                let req = build_req!(agent.get(&url));
+                let mut resp = req.call()?;
+                (
+                    resp.status(),
+                    resp.body_mut().read_to_string().unwrap_or_default(),
+                )
+            }
+        };
+
+        Ok((u16::from(status_code), body))
+    })();
+
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    match send_result {
+        Ok((status_code, body)) => {
+            let status_text = format!("HTTP {status_code} {method}");
+            let success = (200..300).contains(&(status_code as i32));
+
+            Ok(StepResult {
+                step_id: step.id.clone(),
+                status: if success {
+                    StepStatus::Success
+                } else {
+                    StepStatus::Failed
+                },
+                exit_code: Some(if success { 0 } else { 1 }),
+                stdout: body,
+                stderr: status_text,
+                execution_time_ms: elapsed,
+            })
+        }
+        Err(e) => Ok(StepResult {
+            step_id: step.id.clone(),
+            status: StepStatus::Failed,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: format!("HTTP error: {e}"),
+            execution_time_ms: elapsed,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -476,5 +624,61 @@ steps:
         assert!(!evaluate_condition(""));
         assert!(!evaluate_condition("false"));
         assert!(!evaluate_condition("0"));
+    }
+
+    #[test]
+    fn api_step_parse() {
+        let routine = Routine::from_yaml(
+            r#"
+name: api_test
+description: test api
+steps:
+  - id: fetch
+    type: api
+    url: "https://httpbin.org/get"
+    method: GET
+    headers:
+      Accept: application/json
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.steps[0].step_type, StepType::Api);
+        assert_eq!(
+            routine.steps[0].url.as_deref(),
+            Some("https://httpbin.org/get")
+        );
+        assert_eq!(routine.steps[0].method, "GET");
+    }
+
+    #[test]
+    fn api_step_validation_no_url() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad_api
+description: test
+steps:
+  - id: no_url
+    type: api
+    method: GET
+"#,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("url"));
+    }
+
+    #[test]
+    fn cli_step_validation_no_command() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad_cli
+description: test
+steps:
+  - id: no_cmd
+    type: cli
+"#,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("command"));
     }
 }

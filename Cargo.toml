@@ -20,3 +20,4 @@ thiserror = "2"
 rmcp = { version = "1.3", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 schemars = "1"
+ureq = { version = "3", features = ["json"] }

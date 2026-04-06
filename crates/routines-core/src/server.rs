@@ -98,17 +98,25 @@ InputDef:
   default: String (optional)
   description: String (optional)
 
-Step:
+Step (common fields):
   id: String (required) — unique identifier, used in {{ step_id.stdout }}
-  type: cli (required)
+  type: cli|api (required)
+  timeout: integer (optional) — seconds before step is killed
+  when: String (optional) — condition; step skipped if false. Supports: A == B, A != B, truthy
+  on_fail: stop|continue (default: stop) — error strategy; continue allows subsequent steps to run
+
+Step (type: cli):
   command: String (required) — executable name or path
   args: list of String (default: [])
   env: map of String→String (default: {})
   stdin: String (optional) — content piped to subprocess stdin
   working_dir: String (optional) — working directory for subprocess
-  timeout: integer (optional) — seconds before step is killed
-  when: String (optional) — condition; step skipped if false. Supports: A == B, A != B, truthy
-  on_fail: stop|continue (default: stop) — error strategy; continue allows subsequent steps to run
+
+Step (type: api):
+  url: String (required) — HTTP URL, supports templates
+  method: String (default: GET) — HTTP method
+  headers: map of String→String (default: {}) — request headers, supports templates
+  body: String (optional) — request body, supports templates
 
 Template syntax:
   {{ inputs.NAME }}       — input parameter value
@@ -285,26 +293,64 @@ impl RoutinesMcpServer {
         let mut out = String::new();
 
         for (i, step) in routine.steps.iter().enumerate() {
-            let command = ctx
-                .resolve(&step.command, &step.id)
-                .unwrap_or_else(|e| format!("<error: {e}>"));
-            let args: Vec<String> = step
-                .args
-                .iter()
-                .map(|a| {
-                    ctx.resolve(a, &step.id)
-                        .unwrap_or_else(|e| format!("<error: {e}>"))
-                })
-                .collect();
-
-            let _ = writeln!(
-                out,
-                "[{}] {}: {} {}",
-                i + 1,
-                step.id,
-                command,
-                args.join(" ")
-            );
+            match step.step_type {
+                crate::parser::StepType::Cli => {
+                    let command = ctx
+                        .resolve(step.command.as_deref().unwrap_or_default(), &step.id)
+                        .unwrap_or_else(|e| format!("<error: {e}>"));
+                    let args: Vec<String> = step
+                        .args
+                        .iter()
+                        .map(|a| {
+                            ctx.resolve(a, &step.id)
+                                .unwrap_or_else(|e| format!("<error: {e}>"))
+                        })
+                        .collect();
+                    let _ = writeln!(
+                        out,
+                        "[{}] {}: {} {}",
+                        i + 1,
+                        step.id,
+                        command,
+                        args.join(" ")
+                    );
+                }
+                crate::parser::StepType::Api => {
+                    let url = ctx
+                        .resolve(step.url.as_deref().unwrap_or_default(), &step.id)
+                        .unwrap_or_else(|e| format!("<error: {e}>"));
+                    let method = ctx
+                        .resolve(&step.method, &step.id)
+                        .unwrap_or_else(|e| format!("<error: {e}>"));
+                    let _ = writeln!(out, "[{}] {}: {} {}", i + 1, step.id, method, url);
+                    if !step.headers.is_empty() {
+                        let hdr_parts: Vec<String> = step
+                            .headers
+                            .iter()
+                            .map(|(k, v)| {
+                                let resolved = ctx
+                                    .resolve(v, &step.id)
+                                    .unwrap_or_else(|e| format!("<error: {e}>"));
+                                format!("{k}: {resolved}")
+                            })
+                            .collect();
+                        for h in &hdr_parts {
+                            let _ = writeln!(out, "    header: {h}");
+                        }
+                    }
+                    if let Some(body_tmpl) = &step.body {
+                        let resolved = ctx
+                            .resolve(body_tmpl, &step.id)
+                            .unwrap_or_else(|e| format!("<error: {e}>"));
+                        let preview = if resolved.len() > 120 {
+                            format!("{}...", &resolved[..120])
+                        } else {
+                            resolved
+                        };
+                        let _ = writeln!(out, "    body: {preview}");
+                    }
+                }
+            }
 
             if let Some(when_expr) = &step.when {
                 let resolved = ctx

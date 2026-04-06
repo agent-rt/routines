@@ -30,7 +30,10 @@ pub struct Step {
     pub id: String,
     #[serde(rename = "type")]
     pub step_type: StepType,
-    pub command: String,
+    // --- CLI fields ---
+    /// Executable name or path (required for cli, unused for api).
+    #[serde(default)]
+    pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
@@ -41,16 +44,33 @@ pub struct Step {
     /// Working directory for the subprocess. Supports template syntax.
     #[serde(default)]
     pub working_dir: Option<String>,
+    // --- API fields ---
+    /// HTTP URL (required for api). Supports template syntax.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// HTTP method (default: GET).
+    #[serde(default = "default_method")]
+    pub method: String,
+    /// HTTP request headers. Supports template syntax in values.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// HTTP request body. Supports template syntax.
+    #[serde(default)]
+    pub body: Option<String>,
+    // --- Common fields ---
     /// Timeout in seconds. Step is killed and marked FAILED on expiry.
     #[serde(default)]
     pub timeout: Option<u64>,
     /// Condition expression. Step is skipped when condition evaluates to false.
-    /// Supports: `A == B`, `A != B`, or truthy (non-empty string).
     #[serde(default)]
     pub when: Option<String>,
     /// Error strategy when step fails.
     #[serde(default)]
     pub on_fail: OnFail,
+}
+
+fn default_method() -> String {
+    "GET".to_string()
 }
 
 /// Error strategy for a step.
@@ -68,13 +88,40 @@ pub enum OnFail {
 #[serde(rename_all = "lowercase")]
 pub enum StepType {
     Cli,
+    Api,
 }
 
 impl Routine {
     /// Parse a Routine from a YAML string.
     pub fn from_yaml(yaml: &str) -> crate::error::Result<Self> {
         let routine: Routine = serde_yaml::from_str(yaml)?;
+        routine.validate()?;
         Ok(routine)
+    }
+
+    /// Semantic validation after deserialization.
+    fn validate(&self) -> crate::error::Result<()> {
+        for step in &self.steps {
+            match step.step_type {
+                StepType::Cli => {
+                    if step.command.is_none() {
+                        return Err(crate::error::RoutineError::Validation(format!(
+                            "step '{}': type=cli requires 'command' field",
+                            step.id
+                        )));
+                    }
+                }
+                StepType::Api => {
+                    if step.url.is_none() {
+                        return Err(crate::error::RoutineError::Validation(format!(
+                            "step '{}': type=api requires 'url' field",
+                            step.id
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Parse a Routine from a YAML file.
@@ -110,6 +157,6 @@ mod tests {
         assert_eq!(routine.steps.len(), 3);
         // extract_info step should have stdin field
         assert!(routine.steps[1].stdin.is_some());
-        assert_eq!(routine.steps[1].command, "jq");
+        assert_eq!(routine.steps[1].command.as_deref(), Some("jq"));
     }
 }
