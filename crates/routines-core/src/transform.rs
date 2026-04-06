@@ -126,7 +126,8 @@ fn split_pipeline(expr: &str) -> Vec<&str> {
 enum PathSegment {
     Field(String),
     Index(i64),
-    Wildcard, // [*]
+    Slice(i64, i64), // [start:end]
+    Wildcard,        // [*]
 }
 
 fn parse_path(path: &str) -> Result<Vec<PathSegment>> {
@@ -171,6 +172,24 @@ fn parse_path(path: &str) -> Result<Vec<PathSegment>> {
                 }
                 if idx_buf == "*" {
                     segments.push(PathSegment::Wildcard);
+                } else if let Some((start_str, end_str)) = idx_buf.split_once(':') {
+                    let start: i64 = if start_str.is_empty() {
+                        0
+                    } else {
+                        start_str.parse().map_err(|_| RoutineError::Transform {
+                            step_id: String::new(),
+                            message: format!("invalid slice start: {start_str}"),
+                        })?
+                    };
+                    let end: i64 = if end_str.is_empty() {
+                        i64::MAX
+                    } else {
+                        end_str.parse().map_err(|_| RoutineError::Transform {
+                            step_id: String::new(),
+                            message: format!("invalid slice end: {end_str}"),
+                        })?
+                    };
+                    segments.push(PathSegment::Slice(start, end));
                 } else {
                     let idx: i64 = idx_buf.parse().map_err(|_| RoutineError::Transform {
                         step_id: String::new(),
@@ -207,6 +226,15 @@ fn apply_segment(value: &Value, segment: &PathSegment) -> Result<Value> {
                     *idx as usize
                 };
                 Ok(arr.get(actual_idx).cloned().unwrap_or(Value::Null))
+            }
+            _ => Ok(Value::Null),
+        },
+        PathSegment::Slice(start, end) => match value {
+            Value::Array(arr) => {
+                let len = arr.len() as i64;
+                let s = if *start < 0 { (len + start).max(0) as usize } else { (*start as usize).min(arr.len()) };
+                let e = if *end == i64::MAX { arr.len() } else if *end < 0 { (len + end).max(0) as usize } else { (*end as usize).min(arr.len()) };
+                Ok(Value::Array(arr[s..e].to_vec()))
             }
             _ => Ok(Value::Null),
         },
@@ -716,5 +744,26 @@ mod tests {
             "arr": "14:30"
         }]"#);
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn select_array_slice() {
+        let input = json(r#"[10, 20, 30, 40, 50]"#);
+        let result = apply(&input, Some(".[0:3]"), None).unwrap();
+        assert_eq!(result, json("[10, 20, 30]"));
+    }
+
+    #[test]
+    fn select_array_slice_open_end() {
+        let input = json(r#"[10, 20, 30, 40, 50]"#);
+        let result = apply(&input, Some(".[2:]"), None).unwrap();
+        assert_eq!(result, json("[30, 40, 50]"));
+    }
+
+    #[test]
+    fn select_array_slice_negative() {
+        let input = json(r#"[10, 20, 30, 40, 50]"#);
+        let result = apply(&input, Some(".[-2:]"), None).unwrap();
+        assert_eq!(result, json("[40, 50]"));
     }
 }

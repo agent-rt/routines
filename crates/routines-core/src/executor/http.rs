@@ -129,8 +129,8 @@ pub(super) fn execute(
 
     match send_result {
         Ok((status_code, body)) => {
-            let status_text = format!("HTTP {status_code} {method}");
             let success = (200..300).contains(&(status_code as i32));
+            let status_text = format!("HTTP {status_code} {method} {url}");
 
             Ok(StepResult {
                 step_id: step_id.to_string(),
@@ -150,7 +150,7 @@ pub(super) fn execute(
             status: StepStatus::Failed,
             exit_code: Some(1),
             stdout: String::new(),
-            stderr: format!("HTTP error: {e}"),
+            stderr: format!("HTTP error: {e} — {method} {url}"),
             execution_time_ms: elapsed,
         }),
     }

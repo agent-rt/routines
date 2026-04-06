@@ -45,9 +45,9 @@ pub struct RunRoutineParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MetaParams {
-    /// Action: schema, get, create, validate, dry_run, test, history, log
+    /// Action: schema, get, create, validate, dry_run, test, history, log, run_step
     pub action: String,
-    /// Routine name (for get/create/history) or run_id (for log)
+    /// Routine name (for get/create/history/run_step) or run_id (for log)
     #[serde(default)]
     pub name: Option<String>,
     /// Description (for create)
@@ -56,9 +56,26 @@ pub struct MetaParams {
     /// YAML content (for create/validate/dry_run/test)
     #[serde(default)]
     pub yaml_content: Option<String>,
-    /// Sample inputs (for dry_run)
+    /// Sample inputs (for dry_run/run_step)
     #[serde(default)]
     pub inputs: Option<HashMap<String, String>>,
+    /// Step ID to execute (for run_step)
+    #[serde(default)]
+    pub step_id: Option<String>,
+    /// Mock upstream step outputs for run_step: {"step_id": {"stdout": "..."}}
+    #[serde(default)]
+    pub mock_context: Option<HashMap<String, StepMock>>,
+}
+
+/// Mock output for an upstream step, used in run_step.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StepMock {
+    #[serde(default)]
+    pub stdout: Option<String>,
+    #[serde(default)]
+    pub stderr: Option<String>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
 }
 
 const DSL_SCHEMA: &str = "\
@@ -213,6 +230,66 @@ fn err_internal(msg: String) -> ErrorData {
     ErrorData::internal_error(msg, None)
 }
 
+/// Collect all template strings from a step for static analysis.
+fn collect_step_templates(step: &crate::parser::Step) -> Vec<String> {
+    let mut templates = Vec::new();
+    if let Some(when) = &step.when {
+        templates.push(when.clone());
+    }
+    match &step.action {
+        StepAction::Cli { command, args, stdin, env, working_dir } => {
+            templates.push(command.clone());
+            templates.extend(args.iter().cloned());
+            if let Some(s) = stdin { templates.push(s.clone()); }
+            templates.extend(env.values().cloned());
+            if let Some(w) = working_dir { templates.push(w.clone()); }
+        }
+        StepAction::Http { url, method, headers, body } => {
+            templates.push(url.clone());
+            templates.push(method.clone());
+            templates.extend(headers.values().cloned());
+            if let Some(b) = body { templates.push(b.clone()); }
+        }
+        StepAction::Transform { input, select, mapping } => {
+            templates.push(input.clone());
+            if let Some(s) = select { templates.push(s.clone()); }
+            if let Some(m) = mapping { templates.extend(m.values().cloned()); }
+        }
+        StepAction::Routine { name, inputs } => {
+            templates.push(name.clone());
+            templates.extend(inputs.values().cloned());
+        }
+        StepAction::Mcp { server, tool, arguments } => {
+            templates.push(server.clone());
+            templates.push(tool.clone());
+            templates.extend(arguments.values().map(|v| v.to_string()));
+        }
+    }
+    templates
+}
+
+/// Find step ID references in template strings (e.g., {{ step_id.stdout }} → "step_id").
+fn find_step_refs(template: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        rest = &rest[start + 2..];
+        if let Some(end) = rest.find("}}") {
+            let expr = rest[..end].trim();
+            if let Some((prefix, _)) = expr.split_once('.') {
+                let prefix = prefix.trim();
+                if !prefix.is_empty() {
+                    refs.push(prefix.to_string());
+                }
+            }
+            rest = &rest[end + 2..];
+        } else {
+            break;
+        }
+    }
+    refs
+}
+
 fn err_params(msg: String) -> ErrorData {
     ErrorData::invalid_params(msg, None)
 }
@@ -342,7 +419,7 @@ impl RoutinesMcpServer {
         text_ok(out.trim().to_string())
     }
 
-    #[tool(description = "Routine meta-operations: schema/get/create/validate/dry_run/test/history/log")]
+    #[tool(description = "Routine meta-operations: schema/get/create/validate/dry_run/test/history/log/run_step")]
     async fn meta(
         &self,
         Parameters(params): Parameters<MetaParams>,
@@ -385,19 +462,80 @@ impl RoutinesMcpServer {
                 let yaml_content = params
                     .yaml_content
                     .ok_or_else(|| err_params("'yaml_content' required for validate".into()))?;
-                return match Routine::from_yaml(&yaml_content) {
-                    Ok(routine) => {
-                        let strict = if routine.strict_mode { "on" } else { "off" };
-                        text_ok(format!(
-                            "OK: name={}, {} steps, {} inputs, strict_mode={}",
-                            routine.name,
-                            routine.steps.len(),
-                            routine.inputs.len(),
-                            strict,
-                        ))
-                    }
-                    Err(e) => Err(err_params(format!("Invalid YAML: {e}"))),
+                let routine = match Routine::from_yaml(&yaml_content) {
+                    Ok(r) => r,
+                    Err(e) => return Err(err_params(format!("Invalid YAML: {e}"))),
                 };
+
+                let mut warnings: Vec<String> = Vec::new();
+                let mut errors: Vec<String> = Vec::new();
+                let step_ids: std::collections::HashSet<&str> =
+                    routine.steps.iter().map(|s| s.id.as_str()).collect();
+
+                for step in &routine.steps {
+                    // Check template references to step IDs
+                    let templates = collect_step_templates(step);
+                    for tmpl in &templates {
+                        // Find all {{ step_id.xxx }} references
+                        for cap in find_step_refs(tmpl) {
+                            if !step_ids.contains(cap.as_str())
+                                && cap != "inputs"
+                                && cap != "secrets"
+                                && cap != "item"
+                                && cap != "item_index"
+                                && cap != "_run"
+                            {
+                                errors.push(format!(
+                                    "step '{}': references undefined step '{cap}'",
+                                    step.id,
+                                ));
+                            }
+                        }
+                        // Check for unclosed template braces
+                        let open = tmpl.matches("{{").count();
+                        let close = tmpl.matches("}}").count();
+                        if open != close {
+                            errors.push(format!(
+                                "step '{}': mismatched template braces ({{ {open} vs }} {close})",
+                                step.id,
+                            ));
+                        }
+                    }
+
+                    // Warn about for_each downstream usage
+                    if step.for_each.is_some() {
+                        warnings.push(format!(
+                            "step '{}': for_each — downstream '{{{{ {}.stdout }}}}' is a JSON array",
+                            step.id, step.id,
+                        ));
+                    }
+                }
+
+                let strict = if routine.strict_mode { "on" } else { "off" };
+                let mut out = format!(
+                    "name={}, {} steps, {} inputs, strict_mode={}\n",
+                    routine.name,
+                    routine.steps.len(),
+                    routine.inputs.len(),
+                    strict,
+                );
+                if errors.is_empty() && warnings.is_empty() {
+                    out.insert_str(0, "OK: ");
+                } else {
+                    if !errors.is_empty() {
+                        out.push_str("Errors:\n");
+                        for e in &errors {
+                            out.push_str(&format!("  - {e}\n"));
+                        }
+                    }
+                    if !warnings.is_empty() {
+                        out.push_str("Warnings:\n");
+                        for w in &warnings {
+                            out.push_str(&format!("  - {w}\n"));
+                        }
+                    }
+                }
+                return text_ok(out.trim().to_string());
             }
             "dry_run" => {
                 // fall through to dry_run logic below
@@ -495,9 +633,89 @@ impl RoutinesMcpServer {
                 }
                 return text_ok(out.trim().to_string());
             }
+            "run_step" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' required for run_step".into()))?;
+                let step_id = params
+                    .step_id
+                    .ok_or_else(|| err_params("'step_id' required for run_step".into()))?;
+                let yaml_path = resolve_routine_path(&name, &routines_dir());
+                let routine = Routine::from_file(&yaml_path)
+                    .map_err(|e| err_params(format!("Failed to load routine: {e}")))?;
+
+                // Find the target step
+                let step = routine
+                    .steps
+                    .iter()
+                    .find(|s| s.id == step_id)
+                    .ok_or_else(|| err_params(format!("Step '{step_id}' not found in routine")))?;
+
+                // Build context with inputs and mock_context
+                let inputs = params.inputs.unwrap_or_default();
+                let mut resolved_inputs = HashMap::new();
+                for input_def in &routine.inputs {
+                    if let Some(value) = inputs.get(&input_def.name) {
+                        resolved_inputs.insert(input_def.name.clone(), value.clone());
+                    } else if let Some(default) = &input_def.default {
+                        resolved_inputs.insert(input_def.name.clone(), default.clone());
+                    }
+                }
+
+                let secret_map = secrets::load_secrets(&routines_dir().join(".env"));
+                let mut ctx = crate::context::Context::new(resolved_inputs, secret_map.clone());
+
+                // Inject mock upstream outputs
+                if let Some(mock_ctx) = params.mock_context {
+                    for (sid, mock) in mock_ctx {
+                        ctx.add_step_output(
+                            sid,
+                            crate::context::StepOutput {
+                                stdout: mock.stdout.unwrap_or_default(),
+                                stderr: mock.stderr.unwrap_or_default(),
+                                exit_code: mock.exit_code,
+                            },
+                        );
+                    }
+                }
+
+                // Execute the single step
+                let result = executor::execute_single_step(step, &routine, &ctx, &secret_map, &routines_dir());
+                match result {
+                    Ok(sr) => {
+                        let status = match sr.status {
+                            StepStatus::Success => "OK",
+                            StepStatus::Failed => "FAIL",
+                            StepStatus::Skipped => "SKIP",
+                        };
+                        let mut out = format!(
+                            "[{status}] {} exit={} {}ms\n",
+                            sr.step_id,
+                            sr.exit_code.unwrap_or(-1),
+                            sr.execution_time_ms,
+                        );
+                        if !sr.stdout.is_empty() {
+                            let trimmed = sr.stdout.trim();
+                            let preview = if trimmed.len() > 500 {
+                                format!("{}...(truncated)", &trimmed[..500])
+                            } else {
+                                trimmed.to_string()
+                            };
+                            out.push_str(&format!("stdout: {preview}\n"));
+                        }
+                        if !sr.stderr.is_empty() {
+                            out.push_str(&format!("stderr: {}\n", sr.stderr.trim()));
+                        }
+                        return text_ok(out.trim().to_string());
+                    }
+                    Err(e) => {
+                        return Err(err_internal(format!("Step execution error: {e}")));
+                    }
+                }
+            }
             other => {
                 return Err(err_params(format!(
-                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run, test, history, log"
+                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run, test, history, log, run_step"
                 )));
             }
         }
@@ -944,8 +1162,8 @@ impl ServerHandler for RoutinesMcpServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("routines", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Routines: workflow engine. list_routines → discover, \
-             run → execute, meta → schema/get/create/validate/dry_run/test/history/log."
+            "Routines: workflow engine. list → discover, \
+             run → execute, meta → schema/get/create/validate/dry_run/test/history/log/run_step."
                 .into(),
         );
         info

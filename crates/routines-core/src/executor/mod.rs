@@ -200,6 +200,18 @@ pub fn run_routine_with_mocks(
     run_routine_with_depth(routine, inputs, secrets, default_routines_dir(), 0, ctx_mocks)
 }
 
+/// Execute a single step in isolation (for debugging/run_step).
+/// The caller provides a pre-built Context with inputs and mock upstream outputs.
+pub fn execute_single_step(
+    step: &crate::parser::Step,
+    routine: &Routine,
+    ctx: &crate::context::Context,
+    secrets: &HashMap<String, String>,
+    routines_dir: &PathBuf,
+) -> Result<StepResult> {
+    execute_step(step, routine, ctx, secrets, routines_dir, 0)
+}
+
 /// Execute a routine with depth tracking for recursion protection.
 pub(crate) fn run_routine_with_depth(
     routine: &Routine,
@@ -382,7 +394,21 @@ fn execute_step(
                     step_id: step.id.clone(),
                     message: format!("input is not valid JSON: {e}"),
                 })?;
-            match crate::transform::apply(&json_input, select.as_deref(), mapping.as_ref()) {
+            // Resolve template variables in select path before parsing
+            let resolved_select = select
+                .as_ref()
+                .map(|s| ctx.resolve(s, &step.id))
+                .transpose()?;
+            // Resolve template variables in mapping values
+            let resolved_mapping = mapping.as_ref().map(|m| {
+                let mut resolved = indexmap::IndexMap::new();
+                for (key, val) in m {
+                    let resolved_val = ctx.resolve(val, &step.id).unwrap_or_else(|_| val.clone());
+                    resolved.insert(key.clone(), resolved_val);
+                }
+                resolved
+            });
+            match crate::transform::apply(&json_input, resolved_select.as_deref(), resolved_mapping.as_ref()) {
                 Ok(output) => {
                     let stdout = serde_json::to_string(&output).unwrap_or_default();
                     Ok(StepResult {
@@ -394,14 +420,20 @@ fn execute_step(
                         execution_time_ms: start.elapsed().as_millis() as u64,
                     })
                 }
-                Err(e) => Ok(StepResult {
-                    step_id: step.id.clone(),
-                    status: StepStatus::Failed,
-                    exit_code: Some(1),
-                    stdout: String::new(),
-                    stderr: e.to_string(),
-                    execution_time_ms: start.elapsed().as_millis() as u64,
-                }),
+                Err(e) => {
+                    let context_info = resolved_select
+                        .as_deref()
+                        .map(|s| format!(" — select: {s}"))
+                        .unwrap_or_default();
+                    Ok(StepResult {
+                        step_id: step.id.clone(),
+                        status: StepStatus::Failed,
+                        exit_code: Some(1),
+                        stdout: String::new(),
+                        stderr: format!("{e}{context_info}"),
+                        execution_time_ms: start.elapsed().as_millis() as u64,
+                    })
+                }
             }
         }
     }
@@ -496,15 +528,24 @@ fn execute_step_with_foreach(
             .collect(),
         ForEach::Template(template) => {
             let resolved = ctx.resolve(template, &step.id)?;
-            // Try to parse as JSON array
-            serde_json::from_str::<Vec<String>>(&resolved).unwrap_or_else(|_| {
-                // Fallback: treat as newline-separated text
-                resolved
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|l| l.to_string())
-                    .collect()
-            })
+            // Try to parse as JSON array (any element type)
+            serde_json::from_str::<Vec<serde_json::Value>>(&resolved)
+                .map(|arr| {
+                    arr.into_iter()
+                        .map(|v| match v {
+                            serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|_| {
+                    // Fallback: treat as newline-separated text
+                    resolved
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(|l| l.to_string())
+                        .collect()
+                })
         }
     };
 
@@ -544,16 +585,23 @@ fn execute_step_with_foreach(
         }
     }
 
-    // Store aggregated stdout in context for downstream reference under the original step_id.
-    // Last iteration's stdout is stored as step_id.stdout (backward compat).
-    if let Some(last) = results.last() {
-        let last_stdout = last.stdout.trim().to_string();
-        let last_stderr = last.stderr.trim().to_string();
-        let last_exit = last.exit_code;
+    // Aggregate all iteration stdouts as a JSON array for downstream steps.
+    // Each stdout is attempted to parse as JSON; if valid, stored as-is; otherwise as string.
+    {
+        let collected: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                let trimmed = r.stdout.trim();
+                serde_json::from_str(trimmed).unwrap_or_else(|_| serde_json::Value::String(trimmed.to_string()))
+            })
+            .collect();
+        let aggregated = serde_json::to_string(&collected).unwrap_or_else(|_| "[]".to_string());
+        let last_stderr = results.last().map(|r| r.stderr.trim().to_string()).unwrap_or_default();
+        let last_exit = results.last().and_then(|r| r.exit_code);
         ctx.add_step_output(
             step.id.clone(),
             StepOutput {
-                stdout: last_stdout,
+                stdout: aggregated,
                 stderr: last_stderr,
                 exit_code: last_exit,
             },
@@ -597,7 +645,8 @@ fn run_finally(
 
         match results {
             Ok(results) => {
-                // Update context for subsequent finally steps
+                // For non-foreach: update context for subsequent finally steps
+                // For foreach: already aggregated inside execute_step_with_foreach
                 if step.for_each.is_none()
                     && let Some(result) = results.first()
                 {
@@ -666,11 +715,10 @@ fn run_sequential(
         let results =
             execute_step_with_foreach(step, routine, &mut ctx, &secrets, &routines_dir, depth)?;
 
-        // For non-foreach steps, context is already updated in execute_step_with_foreach
-        // For foreach steps, context is updated with last iteration's output
+        // For foreach steps, context is updated (aggregated JSON array) inside execute_step_with_foreach.
+        // For non-foreach steps, update context here with the single result.
         let any_failed = results.iter().any(|r| r.status == StepStatus::Failed);
 
-        // If this is NOT a for_each step, update context normally
         if step.for_each.is_none()
             && let Some(result) = results.first()
         {
@@ -855,8 +903,8 @@ fn run_dag(
                     // Write output to shared context
                     {
                         let mut ctx = ctx.lock().unwrap();
-                        // For foreach: context was updated in execute_step_with_foreach
                         // For non-foreach: update context with the single result
+                        // For foreach: aggregated inside execute_step_with_foreach (copy from snapshot)
                         if step.for_each.is_none() {
                             if let Some(result) = step_results.first() {
                                 ctx.add_step_output(
@@ -1711,7 +1759,7 @@ steps:
     }
 
     #[test]
-    fn for_each_downstream_sees_last_output() {
+    fn for_each_downstream_sees_aggregated_json_array() {
         let routine = Routine::from_yaml(
             r#"
 name: foreach_downstream
@@ -1735,8 +1783,100 @@ steps:
 
         let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
         assert_eq!(result.status, RunStatus::Success);
-        // check step should see the last iteration's stdout
-        assert!(result.step_results.last().unwrap().stdout.contains("prev=last"));
+        // check step should see aggregated JSON array of all iteration stdouts
+        let check_stdout = &result.step_results.last().unwrap().stdout;
+        assert!(check_stdout.contains("first"), "should contain 'first': {check_stdout}");
+        assert!(check_stdout.contains("second"), "should contain 'second': {check_stdout}");
+        assert!(check_stdout.contains("last"), "should contain 'last': {check_stdout}");
+    }
+
+    #[test]
+    fn for_each_json_number_array() {
+        let routine = Routine::from_yaml(
+            r#"
+name: foreach_numbers
+description: test
+steps:
+  - id: gen
+    type: cli
+    command: echo
+    args: ["[10, 20, 30]"]
+  - id: iter
+    type: cli
+    command: echo
+    args: ["val={{ item }}"]
+    for_each: "{{ gen.stdout }}"
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results.len(), 4); // gen + 3 iterations
+        assert!(result.step_results[1].stdout.contains("val=10"));
+        assert!(result.step_results[2].stdout.contains("val=20"));
+        assert!(result.step_results[3].stdout.contains("val=30"));
+    }
+
+    #[test]
+    fn transform_select_with_dynamic_slice() {
+        let routine = Routine::from_yaml(
+            r#"
+name: dynamic_slice
+description: test
+inputs:
+  - name: NUM
+    required: true
+steps:
+  - id: data
+    type: cli
+    command: echo
+    args: ['[1,2,3,4,5]']
+  - id: slice
+    type: transform
+    input: "{{ data.stdout }}"
+    select: ".[0:{{ inputs.NUM }}]"
+output: "{{ slice.stdout }}"
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("NUM".into(), "3".into());
+        let result = run_routine(&routine, inputs, HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.output.as_deref(), Some("[1,2,3]"));
+    }
+
+    #[test]
+    fn for_each_aggregation_with_transform() {
+        let routine = Routine::from_yaml(
+            r#"
+name: fanout_collect
+description: test
+steps:
+  - id: iterate
+    type: cli
+    command: echo
+    args: ['{"name":"{{ item }}"}']
+    for_each:
+      - alice
+      - bob
+  - id: format
+    type: transform
+    input: "{{ iterate.stdout }}"
+    mapping:
+      name: ".name"
+output: "{{ format.stdout }}"
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        let output = result.output.unwrap();
+        assert!(output.contains("alice"), "output should contain alice: {output}");
+        assert!(output.contains("bob"), "output should contain bob: {output}");
     }
 
     #[test]
