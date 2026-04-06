@@ -100,7 +100,7 @@ InputDef:
 
 Step (common fields):
   id: String (required) — unique identifier, used in {{ step_id.stdout }}
-  type: cli|http (required)
+  type: cli|http|routine (required)
   timeout: integer (optional) — seconds before step is killed
   when: String (optional) — condition; step skipped if false. Supports: A == B, A != B, truthy
   on_fail: stop|continue (default: stop) — error strategy; continue allows subsequent steps to run
@@ -117,6 +117,10 @@ Step (type: http):
   method: String (default: GET) — HTTP method
   headers: map of String→String (default: {}) — request headers, supports templates
   body: String (optional) — request body, supports templates
+
+Step (type: routine):
+  name: String (required) — name of routine to invoke from hub
+  inputs: map of String→String (default: {}) — input parameters, supports templates
 
 Template syntax:
   {{ inputs.NAME }}       — input parameter value
@@ -385,6 +389,21 @@ impl RoutinesMcpServer {
                             resolved
                         };
                         let _ = writeln!(out, "    body: {preview}");
+                    }
+                }
+                StepAction::Routine { name, inputs } => {
+                    let _ = writeln!(out, "[{}] {}: routine {}", i + 1, step.id, name);
+                    if !inputs.is_empty() {
+                        let input_parts: Vec<String> = inputs
+                            .iter()
+                            .map(|(k, v)| {
+                                let resolved = ctx
+                                    .resolve(v, &step.id)
+                                    .unwrap_or_else(|e| format!("<error: {e}>"));
+                                format!("{k}={resolved}")
+                            })
+                            .collect();
+                        let _ = writeln!(out, "    inputs: {}", input_parts.join(" "));
                     }
                 }
             }

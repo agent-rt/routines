@@ -68,6 +68,11 @@ pub enum StepAction {
         #[serde(default)]
         body: Option<String>,
     },
+    Routine {
+        name: String,
+        #[serde(default)]
+        inputs: HashMap<String, String>,
+    },
 }
 
 fn default_method() -> String {

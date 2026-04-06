@@ -1,7 +1,9 @@
 mod cli;
 mod http;
+mod routine;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
@@ -85,11 +87,33 @@ pub(crate) fn evaluate_condition(expr: &str) -> bool {
     !trimmed.is_empty() && trimmed != "false" && trimmed != "0"
 }
 
+fn default_routines_dir() -> PathBuf {
+    std::env::var("ROUTINES_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".routines")
+        })
+}
+
 /// Execute a full routine with the given inputs and secrets.
 pub fn run_routine(
     routine: &Routine,
     inputs: HashMap<String, String>,
     secrets: HashMap<String, String>,
+) -> Result<RunResult> {
+    run_routine_with_depth(routine, inputs, secrets, default_routines_dir(), 0)
+}
+
+/// Execute a routine with depth tracking for recursion protection.
+pub(crate) fn run_routine_with_depth(
+    routine: &Routine,
+    inputs: HashMap<String, String>,
+    secrets: HashMap<String, String>,
+    routines_dir: PathBuf,
+    depth: u32,
 ) -> Result<RunResult> {
     // Validate required inputs
     for input_def in &routine.inputs {
@@ -108,7 +132,7 @@ pub fn run_routine(
         }
     }
 
-    let mut ctx = Context::new(resolved_inputs, secrets);
+    let mut ctx = Context::new(resolved_inputs, secrets.clone());
     let mut step_results = Vec::new();
     let mut has_failure = false;
 
@@ -170,6 +194,21 @@ pub fn run_routine(
                 headers,
                 body.as_deref(),
                 step.timeout,
+                &ctx,
+            )?,
+            StepAction::Routine {
+                name,
+                inputs: input_templates,
+            } => routine::execute(
+                &routine::RoutineParams {
+                    step_id: &step.id,
+                    name,
+                    input_templates,
+                    timeout: step.timeout,
+                    depth,
+                    secrets: &secrets,
+                    routines_dir: &routines_dir,
+                },
                 &ctx,
             )?,
         };
@@ -402,5 +441,123 @@ steps:
         assert!(!evaluate_condition(""));
         assert!(!evaluate_condition("false"));
         assert!(!evaluate_condition("0"));
+    }
+
+    #[test]
+    fn routine_step_calls_sub_routine() {
+        // Create temp hub with a sub-routine
+        let tmp = std::env::temp_dir().join("routines_test_composition");
+        let hub = tmp.join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::write(
+            hub.join("greeter.yml"),
+            r#"
+name: greeter
+description: greet someone
+inputs:
+  - name: WHO
+    required: true
+steps:
+  - id: greet
+    type: cli
+    command: echo
+    args: ["Hello {{ inputs.WHO }}"]
+"#,
+        )
+        .unwrap();
+
+        // Parent routine calls sub-routine
+        let parent = Routine::from_yaml(
+            r#"
+name: parent
+description: test
+inputs:
+  - name: NAME
+    required: true
+steps:
+  - id: call_greeter
+    type: routine
+    name: greeter
+    inputs:
+      WHO: "{{ inputs.NAME }}"
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("NAME".to_string(), "World".to_string());
+        let result =
+            run_routine_with_depth(&parent, inputs, HashMap::new(), tmp.clone(), 0).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert!(result.step_results[0].stdout.contains("Hello World"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn routine_step_not_found() {
+        let tmp = std::env::temp_dir().join("routines_test_notfound");
+        let hub = tmp.join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+
+        let routine = Routine::from_yaml(
+            r#"
+name: test
+description: test
+steps:
+  - id: missing
+    type: routine
+    name: nonexistent
+"#,
+        )
+        .unwrap();
+
+        let result =
+            run_routine_with_depth(&routine, HashMap::new(), HashMap::new(), tmp.clone(), 0)
+                .unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        assert!(result.step_results[0].stderr.contains("not found"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn routine_step_max_depth() {
+        let tmp = std::env::temp_dir().join("routines_test_depth");
+        let hub = tmp.join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+        // Self-recursive routine
+        std::fs::write(
+            hub.join("recurse.yml"),
+            r#"
+name: recurse
+description: infinite loop
+steps:
+  - id: loop
+    type: routine
+    name: recurse
+"#,
+        )
+        .unwrap();
+
+        let routine = Routine::from_yaml(
+            r#"
+name: start
+description: test
+steps:
+  - id: go
+    type: routine
+    name: recurse
+"#,
+        )
+        .unwrap();
+
+        let result =
+            run_routine_with_depth(&routine, HashMap::new(), HashMap::new(), tmp.clone(), 0)
+                .unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        assert!(result.step_results[0].stderr.contains("depth"));
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
