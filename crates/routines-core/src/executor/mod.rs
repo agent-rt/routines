@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, Condvar};
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
-use crate::parser::{BackoffStrategy, OnFail, OutputFormat, Routine, Step, StepAction};
+use crate::parser::{BackoffStrategy, InputDef, InputType, OnFail, OutputFormat, Routine, Step, StepAction};
 
 /// Result of executing a single step.
 #[derive(Debug, Clone)]
@@ -93,6 +93,68 @@ pub(crate) fn evaluate_condition(expr: &str) -> bool {
     !trimmed.is_empty() && trimmed != "false" && trimmed != "0"
 }
 
+/// Validate an input value against its declared type.
+fn validate_input(def: &InputDef, value: &str) -> Result<()> {
+    match def.input_type {
+        InputType::String => {} // always valid
+        InputType::Int => {
+            if value.parse::<i64>().is_err() {
+                return Err(RoutineError::InvalidInput {
+                    name: def.name.clone(),
+                    expected: "int".to_string(),
+                    got: value.to_string(),
+                });
+            }
+        }
+        InputType::Float => {
+            if value.parse::<f64>().is_err() {
+                return Err(RoutineError::InvalidInput {
+                    name: def.name.clone(),
+                    expected: "float".to_string(),
+                    got: value.to_string(),
+                });
+            }
+        }
+        InputType::Bool => {
+            if !matches!(value, "true" | "false" | "1" | "0") {
+                return Err(RoutineError::InvalidInput {
+                    name: def.name.clone(),
+                    expected: "bool (true/false/1/0)".to_string(),
+                    got: value.to_string(),
+                });
+            }
+        }
+        InputType::Date => {
+            // YYYY-MM-DD format
+            let valid = value.len() == 10
+                && value.as_bytes()[4] == b'-'
+                && value.as_bytes()[7] == b'-'
+                && value[0..4].parse::<u32>().is_ok()
+                && value[5..7].parse::<u32>().is_ok()
+                && value[8..10].parse::<u32>().is_ok();
+            if !valid {
+                return Err(RoutineError::InvalidInput {
+                    name: def.name.clone(),
+                    expected: "date (YYYY-MM-DD)".to_string(),
+                    got: value.to_string(),
+                });
+            }
+        }
+        InputType::Enum => {
+            if let Some(allowed) = &def.enum_values
+                && !allowed.iter().any(|v| v == value)
+            {
+                return Err(RoutineError::InvalidInput {
+                    name: def.name.clone(),
+                    expected: format!("one of [{}]", allowed.join(", ")),
+                    got: value.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn default_routines_dir() -> PathBuf {
     std::env::var("ROUTINES_HOME")
         .map(PathBuf::from)
@@ -135,6 +197,13 @@ pub(crate) fn run_routine_with_depth(
             resolved_inputs.insert(input_def.name.clone(), value.clone());
         } else if let Some(default) = &input_def.default {
             resolved_inputs.insert(input_def.name.clone(), default.clone());
+        }
+    }
+
+    // Validate input types
+    for input_def in &routine.inputs {
+        if let Some(value) = resolved_inputs.get(&input_def.name) {
+            validate_input(input_def, value)?;
         }
     }
 
@@ -1844,6 +1913,202 @@ steps:
 
         let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
         assert!(result.output.is_none());
+    }
+
+    #[test]
+    fn validate_int_input_ok() {
+        let routine = Routine::from_yaml(
+            r#"
+name: int_test
+description: test
+inputs:
+  - name: COUNT
+    type: int
+steps:
+  - id: run
+    type: cli
+    command: echo
+    args: ["{{ inputs.COUNT }}"]
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("COUNT".to_string(), "42".to_string());
+        let result = run_routine(&routine, inputs, HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+    }
+
+    #[test]
+    fn invalid_int_fails() {
+        let routine = Routine::from_yaml(
+            r#"
+name: int_test
+description: test
+inputs:
+  - name: COUNT
+    type: int
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("COUNT".to_string(), "abc".to_string());
+        let err = run_routine(&routine, inputs, HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("Invalid input 'COUNT'"));
+        assert!(err.to_string().contains("int"));
+    }
+
+    #[test]
+    fn validate_date_input_ok() {
+        let routine = Routine::from_yaml(
+            r#"
+name: date_test
+description: test
+inputs:
+  - name: DATE
+    type: date
+steps:
+  - id: run
+    type: cli
+    command: echo
+    args: ["{{ inputs.DATE }}"]
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("DATE".to_string(), "2026-09-20".to_string());
+        let result = run_routine(&routine, inputs, HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+    }
+
+    #[test]
+    fn invalid_date_fails() {
+        let routine = Routine::from_yaml(
+            r#"
+name: date_test
+description: test
+inputs:
+  - name: DATE
+    type: date
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("DATE".to_string(), "next_friday".to_string());
+        let err = run_routine(&routine, inputs, HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("Invalid input 'DATE'"));
+        assert!(err.to_string().contains("date"));
+    }
+
+    #[test]
+    fn validate_enum_input_ok() {
+        let routine = Routine::from_yaml(
+            r#"
+name: enum_test
+description: test
+inputs:
+  - name: SORT
+    type: enum
+    enum_values: ["1", "2", "3"]
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("SORT".to_string(), "3".to_string());
+        let result = run_routine(&routine, inputs, HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+    }
+
+    #[test]
+    fn invalid_enum_fails() {
+        let routine = Routine::from_yaml(
+            r#"
+name: enum_test
+description: test
+inputs:
+  - name: SORT
+    type: enum
+    enum_values: ["1", "2", "3"]
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("SORT".to_string(), "99".to_string());
+        let err = run_routine(&routine, inputs, HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("Invalid input 'SORT'"));
+        assert!(err.to_string().contains("one of"));
+    }
+
+    #[test]
+    fn validate_bool_input() {
+        let routine = Routine::from_yaml(
+            r#"
+name: bool_test
+description: test
+inputs:
+  - name: VERBOSE
+    type: bool
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        // Valid
+        let mut inputs = HashMap::new();
+        inputs.insert("VERBOSE".to_string(), "true".to_string());
+        assert!(run_routine(&routine, inputs, HashMap::new()).is_ok());
+
+        // Invalid
+        let mut inputs = HashMap::new();
+        inputs.insert("VERBOSE".to_string(), "yes".to_string());
+        let err = run_routine(&routine, inputs, HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("bool"));
+    }
+
+    #[test]
+    fn default_value_also_validated() {
+        let routine = Routine::from_yaml(
+            r#"
+name: bad_default
+description: test
+inputs:
+  - name: COUNT
+    type: int
+    default: "not_a_number"
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        let err = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("Invalid input 'COUNT'"));
     }
 
     #[test]

@@ -142,6 +142,8 @@ InputDef:
   required: bool (default: false)
   default: String (optional)
   description: String (optional)
+  type: string|int|float|bool|date|enum (default: string) — validated before execution
+  enum_values: list of String (required when type: enum) — allowed values
 
 Step (common fields):
   id: String (required) — unique identifier, used in {{ step_id.stdout }}

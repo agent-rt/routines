@@ -97,6 +97,25 @@ pub struct InputDef {
     pub default: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Type constraint for validation before execution.
+    #[serde(default, rename = "type")]
+    pub input_type: InputType,
+    /// Allowed values when input_type is Enum.
+    #[serde(default)]
+    pub enum_values: Option<Vec<String>>,
+}
+
+/// Input parameter type for validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum InputType {
+    #[default]
+    String,
+    Int,
+    Float,
+    Bool,
+    Date,
+    Enum,
 }
 
 /// A single execution step with type-safe action.
@@ -977,6 +996,85 @@ steps:
             }
             other => panic!("expected SecretsEnv::List, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_input_types() {
+        let routine = Routine::from_yaml(
+            r#"
+name: typed
+description: test
+inputs:
+  - name: COUNT
+    type: int
+  - name: RATE
+    type: float
+  - name: VERBOSE
+    type: bool
+  - name: DATE
+    type: date
+  - name: NAME
+    type: string
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.inputs[0].input_type, InputType::Int);
+        assert_eq!(routine.inputs[1].input_type, InputType::Float);
+        assert_eq!(routine.inputs[2].input_type, InputType::Bool);
+        assert_eq!(routine.inputs[3].input_type, InputType::Date);
+        assert_eq!(routine.inputs[4].input_type, InputType::String);
+    }
+
+    #[test]
+    fn parse_input_enum() {
+        let routine = Routine::from_yaml(
+            r#"
+name: enum_test
+description: test
+inputs:
+  - name: SORT
+    type: enum
+    enum_values: ["1", "2", "3"]
+    default: "3"
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.inputs[0].input_type, InputType::Enum);
+        assert_eq!(
+            routine.inputs[0].enum_values.as_deref(),
+            Some(vec!["1".to_string(), "2".to_string(), "3".to_string()]).as_deref()
+        );
+    }
+
+    #[test]
+    fn no_type_defaults_to_string() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_type
+description: test
+inputs:
+  - name: FOO
+    required: true
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.inputs[0].input_type, InputType::String);
+        assert!(routine.inputs[0].enum_values.is_none());
     }
 
     #[test]
