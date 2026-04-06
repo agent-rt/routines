@@ -561,29 +561,96 @@ fn execute_step_with_foreach(
         }]);
     }
 
-    let mut results = Vec::with_capacity(items.len());
+    let concurrency = step.concurrency.unwrap_or(1);
+    let effective_concurrency = if concurrency == 0 { items.len() } else { concurrency as usize };
 
-    for (index, item) in items.iter().enumerate() {
-        // Inject iteration variables
-        let prev = ctx.set_iteration(item.clone(), index);
+    let results = if effective_concurrency <= 1 {
+        // Serial path
+        let mut results = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let prev = ctx.set_iteration(item.clone(), index);
+            let result = execute_step_with_retry(step, routine, ctx, secrets, routines_dir, depth)?;
+            ctx.restore_iteration(prev);
 
-        let result = execute_step_with_retry(step, routine, ctx, secrets, routines_dir, depth)?;
-
-        // Restore iteration state
-        ctx.restore_iteration(prev);
-
-        let mut result = result;
-        // Tag step_id with iteration index
-        result.step_id = format!("{}[{}]", step.id, index);
-
-        let failed = result.status == StepStatus::Failed;
-        results.push(result);
-
-        if failed {
-            // Stop iteration on failure (respects on_fail at the step level in the caller)
-            break;
+            let mut result = result;
+            result.step_id = format!("{}[{}]", step.id, index);
+            let failed = result.status == StepStatus::Failed;
+            results.push(result);
+            if failed {
+                break;
+            }
         }
-    }
+        results
+    } else {
+        // Concurrent path
+        use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+
+        let aborted = Arc::new(AtomicBool::new(false));
+        let results: Arc<Mutex<Vec<(usize, StepResult)>>> =
+            Arc::new(Mutex::new(Vec::with_capacity(items.len())));
+
+        // Use a channel as a semaphore to limit concurrency
+        let (sem_tx, sem_rx) = std::sync::mpsc::sync_channel::<()>(effective_concurrency);
+        // Pre-fill semaphore slots
+        for _ in 0..effective_concurrency {
+            let _ = sem_tx.send(());
+        }
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+
+            for (index, item) in items.iter().enumerate() {
+                if aborted.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // Acquire semaphore slot (blocks if all slots in use)
+                let Ok(()) = sem_rx.recv() else { break };
+
+                let mut ctx_snapshot = ctx.clone();
+                ctx_snapshot.set_iteration(item.clone(), index);
+
+                let results_ref = Arc::clone(&results);
+                let aborted_ref = Arc::clone(&aborted);
+                let sem_tx = sem_tx.clone();
+
+                handles.push(scope.spawn(move || {
+                    let result = execute_step_with_retry(
+                        step, routine, &ctx_snapshot, secrets, routines_dir, depth,
+                    );
+
+                    let mut sr = match result {
+                        Ok(r) => r,
+                        Err(e) => StepResult {
+                            step_id: step.id.clone(),
+                            status: StepStatus::Failed,
+                            exit_code: Some(1),
+                            stdout: String::new(),
+                            stderr: e.to_string(),
+                            execution_time_ms: 0,
+                        },
+                    };
+                    sr.step_id = format!("{}[{}]", step.id, index);
+
+                    if sr.status == StepStatus::Failed {
+                        aborted_ref.store(true, Ordering::Relaxed);
+                    }
+
+                    results_ref.lock().unwrap().push((index, sr));
+
+                    // Release semaphore slot
+                    let _ = sem_tx.send(());
+                }));
+            }
+
+            // All threads join automatically at scope exit
+        });
+
+        // Sort by original index to preserve order
+        let mut indexed = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+        indexed.sort_by_key(|(idx, _)| *idx);
+        indexed.into_iter().map(|(_, r)| r).collect()
+    };
 
     // Aggregate all iteration stdouts as a JSON array for downstream steps.
     // Each stdout is attempted to parse as JSON; if valid, stored as-is; otherwise as string.
@@ -1877,6 +1944,97 @@ output: "{{ format.stdout }}"
         let output = result.output.unwrap();
         assert!(output.contains("alice"), "output should contain alice: {output}");
         assert!(output.contains("bob"), "output should contain bob: {output}");
+    }
+
+    #[test]
+    fn for_each_concurrent_basic() {
+        let routine = Routine::from_yaml(
+            r#"
+name: concurrent_basic
+description: test
+steps:
+  - id: greet
+    type: cli
+    command: echo
+    args: ["hello {{ item }}"]
+    for_each:
+      - alice
+      - bob
+      - charlie
+      - dave
+      - eve
+      - frank
+    concurrency: 3
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results.len(), 6);
+        // Results should be in original order
+        assert!(result.step_results[0].stdout.contains("hello alice"));
+        assert!(result.step_results[1].stdout.contains("hello bob"));
+        assert!(result.step_results[5].stdout.contains("hello frank"));
+    }
+
+    #[test]
+    fn for_each_concurrent_aggregates_json() {
+        let routine = Routine::from_yaml(
+            r#"
+name: concurrent_agg
+description: test
+steps:
+  - id: iter
+    type: cli
+    command: echo
+    args: ["{{ item }}"]
+    for_each:
+      - aaa
+      - bbb
+      - ccc
+    concurrency: 0
+  - id: check
+    type: cli
+    command: echo
+    args: ["got={{ iter.stdout }}"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        let check_stdout = &result.step_results.last().unwrap().stdout;
+        assert!(check_stdout.contains("aaa"), "should contain aaa: {check_stdout}");
+        assert!(check_stdout.contains("bbb"), "should contain bbb: {check_stdout}");
+        assert!(check_stdout.contains("ccc"), "should contain ccc: {check_stdout}");
+    }
+
+    #[test]
+    fn for_each_concurrent_failure_stops() {
+        let routine = Routine::from_yaml(
+            r#"
+name: concurrent_fail
+description: test
+steps:
+  - id: might_fail
+    type: cli
+    command: /bin/sh
+    args: ["-c", "if [ '{{ item }}' = 'bad' ]; then exit 1; fi; echo ok"]
+    for_each:
+      - good1
+      - bad
+      - good2
+      - good3
+    concurrency: 2
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        // At least one should have failed
+        assert!(result.step_results.iter().any(|r| r.status == StepStatus::Failed));
     }
 
     #[test]

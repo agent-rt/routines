@@ -115,6 +115,7 @@ Step (common fields):
     delay: integer (default: 1) — initial delay in seconds
     backoff: fixed|exponential (default: fixed) — exponential doubles delay each retry
   for_each: list or template (optional) — iterate step over items, injecting {{ item }} and {{ item_index }}
+  concurrency: integer (optional, default 1) — max concurrent iterations for for_each. 0 = unlimited
 
 Step (type: cli):
   command: String (required) — executable name or path

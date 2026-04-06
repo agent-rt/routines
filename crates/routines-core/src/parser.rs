@@ -143,6 +143,9 @@ pub struct Step {
     /// Iterate this step over a list. Each iteration injects `{{ item }}` and `{{ item_index }}`.
     #[serde(default)]
     pub for_each: Option<ForEach>,
+    /// Max concurrent iterations for for_each. Default None (=1, serial). 0 = unlimited.
+    #[serde(default)]
+    pub concurrency: Option<u32>,
 }
 
 /// Source of iteration items for `for_each`.
