@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
-use crate::parser::{Routine, Step};
+use crate::parser::{OnFail, Routine, Step};
 
 /// Result of executing a single step.
 #[derive(Debug, Clone)]
@@ -22,6 +22,7 @@ pub struct StepResult {
 pub enum StepStatus {
     Success,
     Failed,
+    Skipped,
 }
 
 /// Result of executing an entire routine.
@@ -67,6 +68,25 @@ fn check_dangerous(step_id: &str, command: &str, args: &[String]) -> Result<()> 
     Ok(())
 }
 
+/// Evaluate a simple condition expression.
+/// Supports: `A == B` (equal), `A != B` (not equal), or truthy (non-empty string).
+fn evaluate_condition(expr: &str) -> bool {
+    let trimmed = expr.trim();
+    if let Some((left, right)) = trimmed.split_once("==") {
+        // Check it's not actually !=
+        if left.ends_with('!') {
+            let left = left.strip_suffix('!').unwrap().trim();
+            return left != right.trim();
+        }
+        return left.trim() == right.trim();
+    }
+    if let Some((left, right)) = trimmed.split_once("!=") {
+        return left.trim() != right.trim();
+    }
+    // Truthy: non-empty and not "false" or "0"
+    !trimmed.is_empty() && trimmed != "false" && trimmed != "0"
+}
+
 /// Execute a full routine with the given inputs and secrets.
 pub fn run_routine(
     routine: &Routine,
@@ -92,8 +112,34 @@ pub fn run_routine(
 
     let mut ctx = Context::new(resolved_inputs, secrets);
     let mut step_results = Vec::new();
+    let mut has_failure = false;
 
     for step in &routine.steps {
+        // Evaluate `when` condition
+        if let Some(when_expr) = &step.when {
+            let resolved = ctx.resolve(when_expr, &step.id)?;
+            if !evaluate_condition(&resolved) {
+                let result = StepResult {
+                    step_id: step.id.clone(),
+                    status: StepStatus::Skipped,
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    execution_time_ms: 0,
+                };
+                ctx.add_step_output(
+                    step.id.clone(),
+                    StepOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: None,
+                    },
+                );
+                step_results.push(result);
+                continue;
+            }
+        }
+
         let result = execute_step(step, &ctx, routine.strict_mode)?;
 
         let status = result.status.clone();
@@ -102,20 +148,29 @@ pub fn run_routine(
             StepOutput {
                 stdout: result.stdout.trim().to_string(),
                 stderr: result.stderr.trim().to_string(),
+                exit_code: result.exit_code,
             },
         );
         step_results.push(result);
 
         if status == StepStatus::Failed {
-            return Ok(RunResult {
-                status: RunStatus::Failed,
-                step_results,
-            });
+            if step.on_fail == OnFail::Continue {
+                has_failure = true;
+            } else {
+                return Ok(RunResult {
+                    status: RunStatus::Failed,
+                    step_results,
+                });
+            }
         }
     }
 
     Ok(RunResult {
-        status: RunStatus::Success,
+        status: if has_failure {
+            RunStatus::Failed
+        } else {
+            RunStatus::Success
+        },
         step_results,
     })
 }
@@ -281,5 +336,145 @@ steps:
     fn strict_mode_blocks_case_insensitive() {
         let result = check_dangerous("test", "RM", &["-RF".to_string(), "/".to_string()]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn when_true_executes_step() {
+        let routine = Routine::from_yaml(
+            r#"
+name: when_true
+description: test
+inputs:
+  - name: ENV
+    required: true
+steps:
+  - id: greet
+    type: cli
+    command: echo
+    args: ["hello"]
+    when: "{{ inputs.ENV }} == staging"
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("ENV".to_string(), "staging".to_string());
+        let result = run_routine(&routine, inputs, HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results[0].status, StepStatus::Success);
+    }
+
+    #[test]
+    fn when_false_skips_step() {
+        let routine = Routine::from_yaml(
+            r#"
+name: when_false
+description: test
+inputs:
+  - name: ENV
+    required: true
+steps:
+  - id: greet
+    type: cli
+    command: echo
+    args: ["hello"]
+    when: "{{ inputs.ENV }} == production"
+"#,
+        )
+        .unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("ENV".to_string(), "staging".to_string());
+        let result = run_routine(&routine, inputs, HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results[0].status, StepStatus::Skipped);
+    }
+
+    #[test]
+    fn on_fail_continue_proceeds() {
+        let routine = Routine::from_yaml(
+            r#"
+name: continue_test
+description: test
+steps:
+  - id: fail_step
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+    on_fail: continue
+  - id: after
+    type: cli
+    command: echo
+    args: ["still running"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.step_results.len(), 2);
+        assert_eq!(result.step_results[0].status, StepStatus::Failed);
+        assert_eq!(result.step_results[1].status, StepStatus::Success);
+    }
+
+    #[test]
+    fn on_fail_stop_halts() {
+        let routine = Routine::from_yaml(
+            r#"
+name: stop_test
+description: test
+steps:
+  - id: fail_step
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+  - id: never
+    type: cli
+    command: echo
+    args: ["never reached"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.step_results.len(), 1);
+    }
+
+    #[test]
+    fn exit_code_template_variable() {
+        let routine = Routine::from_yaml(
+            r#"
+name: exit_code_test
+description: test
+steps:
+  - id: maybe_fail
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 42"]
+    on_fail: continue
+  - id: check
+    type: cli
+    command: echo
+    args: ["code={{ maybe_fail.exit_code }}"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.step_results.len(), 2);
+        assert!(result.step_results[1].stdout.contains("code=42"));
+    }
+
+    #[test]
+    fn evaluate_condition_tests() {
+        assert!(evaluate_condition("staging == staging"));
+        assert!(!evaluate_condition("staging == production"));
+        assert!(evaluate_condition("a != b"));
+        assert!(!evaluate_condition("same != same"));
+        assert!(evaluate_condition("nonempty"));
+        assert!(!evaluate_condition(""));
+        assert!(!evaluate_condition("false"));
+        assert!(!evaluate_condition("0"));
     }
 }

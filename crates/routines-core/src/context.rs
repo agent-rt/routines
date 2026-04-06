@@ -14,6 +14,7 @@ pub struct Context {
 pub struct StepOutput {
     pub stdout: String,
     pub stderr: String,
+    pub exit_code: Option<i32>,
 }
 
 impl Context {
@@ -91,6 +92,10 @@ impl Context {
                 match suffix {
                     "stdout" => Ok(output.stdout.clone()),
                     "stderr" => Ok(output.stderr.clone()),
+                    "exit_code" => Ok(output
+                        .exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "-1".to_string())),
                     _ => Err(RoutineError::UndefinedVariable {
                         step_id: current_step_id.to_string(),
                         key: key.to_string(),
@@ -128,6 +133,7 @@ mod tests {
             StepOutput {
                 stdout: "build-ok".to_string(),
                 stderr: String::new(),
+                exit_code: Some(0),
             },
         );
         let result = ctx.resolve("result: {{ build.stdout }}", "notify").unwrap();

@@ -93,6 +93,7 @@ impl AuditDb {
         let status = match step.status {
             StepStatus::Success => "SUCCESS",
             StepStatus::Failed => "FAILED",
+            StepStatus::Skipped => "SKIPPED",
         };
         let stdout = secrets::redact(&step.stdout, secret_values);
         let stderr = secrets::redact(&step.stderr, secret_values);

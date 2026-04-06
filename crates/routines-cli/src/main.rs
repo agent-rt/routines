@@ -130,6 +130,7 @@ fn cmd_run(name: &str, raw_inputs: &[String]) -> routines_core::error::Result<()
         let icon = match step.status {
             StepStatus::Success => "OK",
             StepStatus::Failed => "FAIL",
+            StepStatus::Skipped => "SKIP",
         };
         println!(
             "[{icon}] {step_id} (exit={exit}, {ms}ms)",

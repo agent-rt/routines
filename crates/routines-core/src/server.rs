@@ -107,12 +107,15 @@ Step:
   stdin: String (optional) — content piped to subprocess stdin
   working_dir: String (optional) — working directory for subprocess
   timeout: integer (optional) — seconds before step is killed
+  when: String (optional) — condition; step skipped if false. Supports: A == B, A != B, truthy
+  on_fail: stop|continue (default: stop) — error strategy; continue allows subsequent steps to run
 
 Template syntax:
   {{ inputs.NAME }}       — input parameter value
   {{ secrets.KEY }}       — secret from ~/.routines/.env
   {{ step_id.stdout }}    — stdout of a previous step (trimmed)
   {{ step_id.stderr }}    — stderr of a previous step (trimmed)
+  {{ step_id.exit_code }} — exit code of a previous step (integer string)
 
 Example:
   name: greet
@@ -303,6 +306,15 @@ impl RoutinesMcpServer {
                 args.join(" ")
             );
 
+            if let Some(when_expr) = &step.when {
+                let resolved = ctx
+                    .resolve(when_expr, &step.id)
+                    .unwrap_or_else(|e| format!("<error: {e}>"));
+                let _ = writeln!(out, "    when: {resolved}");
+            }
+            if step.on_fail == crate::parser::OnFail::Continue {
+                let _ = writeln!(out, "    on_fail: continue");
+            }
             if !step.env.is_empty() {
                 let env_parts: Vec<String> = step
                     .env
@@ -417,6 +429,7 @@ impl RoutinesMcpServer {
                     let icon = match step.status {
                         StepStatus::Success => "OK",
                         StepStatus::Failed => "FAIL",
+                        StepStatus::Skipped => "SKIP",
                     };
                     let _ = writeln!(
                         out,

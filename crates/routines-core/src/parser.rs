@@ -44,6 +44,24 @@ pub struct Step {
     /// Timeout in seconds. Step is killed and marked FAILED on expiry.
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// Condition expression. Step is skipped when condition evaluates to false.
+    /// Supports: `A == B`, `A != B`, or truthy (non-empty string).
+    #[serde(default)]
+    pub when: Option<String>,
+    /// Error strategy when step fails.
+    #[serde(default)]
+    pub on_fail: OnFail,
+}
+
+/// Error strategy for a step.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OnFail {
+    /// Stop the entire run on failure (default).
+    #[default]
+    Stop,
+    /// Record failure but continue executing subsequent steps.
+    Continue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
