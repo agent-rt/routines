@@ -172,7 +172,32 @@ pub fn run_routine(
     inputs: HashMap<String, String>,
     secrets: HashMap<String, String>,
 ) -> Result<RunResult> {
-    run_routine_with_depth(routine, inputs, secrets, default_routines_dir(), 0)
+    run_routine_with_depth(routine, inputs, secrets, default_routines_dir(), 0, None)
+}
+
+/// Execute a routine with mock responses for testing.
+pub fn run_routine_with_mocks(
+    routine: &Routine,
+    inputs: HashMap<String, String>,
+    secrets: HashMap<String, String>,
+    mocks: Option<&HashMap<String, crate::testing::MockResponse>>,
+) -> Result<RunResult> {
+    // Convert testing::MockResponse to context::MockResponse
+    let ctx_mocks = mocks.map(|m| {
+        m.iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    crate::context::MockResponse {
+                        stdout: v.stdout.clone(),
+                        stderr: v.stderr.clone(),
+                        exit_code: v.exit_code,
+                    },
+                )
+            })
+            .collect()
+    });
+    run_routine_with_depth(routine, inputs, secrets, default_routines_dir(), 0, ctx_mocks)
 }
 
 /// Execute a routine with depth tracking for recursion protection.
@@ -182,6 +207,7 @@ pub(crate) fn run_routine_with_depth(
     secrets: HashMap<String, String>,
     routines_dir: PathBuf,
     depth: u32,
+    mocks: Option<HashMap<String, crate::context::MockResponse>>,
 ) -> Result<RunResult> {
     // Validate required inputs
     for input_def in &routine.inputs {
@@ -207,7 +233,12 @@ pub(crate) fn run_routine_with_depth(
         }
     }
 
-    let ctx = Context::new(resolved_inputs, secrets.clone());
+    let mut ctx = Context::new(resolved_inputs, secrets.clone());
+
+    // Inject mocks if provided (testing mode)
+    if let Some(m) = mocks {
+        ctx.set_mocks(m);
+    }
 
     // Compute routine-level deadline
     let deadline = routine
@@ -243,6 +274,24 @@ fn execute_step(
                 execution_time_ms: 0,
             });
         }
+    }
+
+    // Check for mock response (testing mode)
+    if let Some(mock) = ctx.get_mock(&step.id) {
+        let exit_code = mock.exit_code.unwrap_or(0);
+        let status = if exit_code == 0 {
+            StepStatus::Success
+        } else {
+            StepStatus::Failed
+        };
+        return Ok(StepResult {
+            step_id: step.id.clone(),
+            status,
+            exit_code: Some(exit_code),
+            stdout: mock.stdout.clone().unwrap_or_default(),
+            stderr: mock.stderr.clone().unwrap_or_default(),
+            execution_time_ms: 0,
+        });
     }
 
     // Compute secrets to inject as env vars based on routine.secrets_env
@@ -1167,7 +1216,7 @@ steps:
         let mut inputs = HashMap::new();
         inputs.insert("NAME".to_string(), "World".to_string());
         let result =
-            run_routine_with_depth(&parent, inputs, HashMap::new(), tmp.clone(), 0).unwrap();
+            run_routine_with_depth(&parent, inputs, HashMap::new(), tmp.clone(), 0, None).unwrap();
         assert_eq!(result.status, RunStatus::Success);
         assert!(result.step_results[0].stdout.contains("Hello World"));
 
@@ -1193,7 +1242,7 @@ steps:
         .unwrap();
 
         let result =
-            run_routine_with_depth(&routine, HashMap::new(), HashMap::new(), tmp.clone(), 0)
+            run_routine_with_depth(&routine, HashMap::new(), HashMap::new(), tmp.clone(), 0, None)
                 .unwrap();
         assert_eq!(result.status, RunStatus::Failed);
         assert!(result.step_results[0].stderr.contains("not found"));
@@ -1233,7 +1282,7 @@ steps:
         .unwrap();
 
         let result =
-            run_routine_with_depth(&routine, HashMap::new(), HashMap::new(), tmp.clone(), 0)
+            run_routine_with_depth(&routine, HashMap::new(), HashMap::new(), tmp.clone(), 0, None)
                 .unwrap();
         assert_eq!(result.status, RunStatus::Failed);
         assert!(result.step_results[0].stderr.contains("depth"));

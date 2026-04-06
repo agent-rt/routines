@@ -81,6 +81,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
         params.secrets.clone(),
         params.routines_dir.to_path_buf(),
         params.depth + 1,
+        None,
     )?;
 
     let elapsed = start.elapsed().as_millis() as u64;

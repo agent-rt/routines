@@ -12,6 +12,16 @@ pub struct Context {
     iteration: Option<IterationVars>,
     /// Run status for finally blocks: "SUCCESS" or "FAILED".
     run_status: Option<String>,
+    /// Mock responses for testing: step_id → mock output.
+    mocks: HashMap<String, MockResponse>,
+}
+
+/// Mock response injected instead of real step execution during testing.
+#[derive(Debug, Clone, Default)]
+pub struct MockResponse {
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 /// Variables injected during a for_each iteration.
@@ -37,7 +47,18 @@ impl Context {
             step_outputs: HashMap::new(),
             iteration: None,
             run_status: None,
+            mocks: HashMap::new(),
         }
+    }
+
+    /// Load mock responses for testing.
+    pub fn set_mocks(&mut self, mocks: HashMap<String, MockResponse>) {
+        self.mocks = mocks;
+    }
+
+    /// Get a mock response for a step, if one exists.
+    pub fn get_mock(&self, step_id: &str) -> Option<&MockResponse> {
+        self.mocks.get(step_id)
     }
 
     /// Set the run status for use in finally blocks.

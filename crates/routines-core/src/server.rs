@@ -45,7 +45,7 @@ pub struct RunRoutineParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ManageRoutineParams {
-    /// Action: schema, get, create, validate, dry_run
+    /// Action: schema, get, create, validate, dry_run, test
     pub action: String,
     /// Routine name (for get/create)
     #[serde(default)]
@@ -342,7 +342,7 @@ impl RoutinesMcpServer {
         text_ok(out.trim().to_string())
     }
 
-    #[tool(description = "Get DSL schema, read/create/validate/dry-run routines")]
+    #[tool(description = "Get DSL schema, read/create/validate/dry-run/test routines")]
     async fn manage(
         &self,
         Parameters(params): Parameters<ManageRoutineParams>,
@@ -402,9 +402,34 @@ impl RoutinesMcpServer {
             "dry_run" => {
                 // fall through to dry_run logic below
             }
+            "test" => {
+                let yaml_content = params
+                    .yaml_content
+                    .ok_or_else(|| err_params("'yaml_content' required for test".into()))?;
+                let suite = crate::testing::TestSuite::from_yaml(&yaml_content)
+                    .map_err(|e| err_params(format!("Invalid test YAML: {e}")))?;
+                let results = crate::testing::run_test_suite(&suite, &routines_dir());
+                let mut out = String::new();
+                let mut pass = 0;
+                let mut fail = 0;
+                for r in &results {
+                    if r.passed {
+                        let _ = writeln!(out, "PASS {}", r.name);
+                        pass += 1;
+                    } else {
+                        let _ = writeln!(out, "FAIL {}", r.name);
+                        for f in &r.failures {
+                            let _ = writeln!(out, "  {f}");
+                        }
+                        fail += 1;
+                    }
+                }
+                let _ = write!(out, "\n{pass} passed, {fail} failed");
+                return text_ok(out.trim().to_string());
+            }
             other => {
                 return Err(err_params(format!(
-                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run"
+                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run, test"
                 )));
             }
         }
@@ -837,7 +862,7 @@ impl ServerHandler for RoutinesMcpServer {
         info.server_info = Implementation::new("routines", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Routines: workflow engine. list_routines → discover, \
-             run_routine → execute, manage_routine → schema/get/create/validate/dry_run."
+             run_routine → execute, manage → schema/get/create/validate/dry_run/test."
                 .into(),
         );
         info
