@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/routines-core", "crates/routines-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+routines-core = { path = "crates/routines-core" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
