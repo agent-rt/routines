@@ -65,6 +65,13 @@ enum Commands {
         #[command(subcommand)]
         action: RegistryAction,
     },
+    /// List all available routines
+    List,
+    /// Validate a routine YAML file
+    Validate {
+        /// Path to the YAML file
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -141,6 +148,8 @@ fn dispatch(cli: Cli) -> routines_core::error::Result<()> {
         Commands::Log { run_id, full } => cmd_log(&run_id, full),
         Commands::Mcp { action } => cmd_mcp(action),
         Commands::Registry { action } => cmd_registry(action),
+        Commands::List => cmd_list(),
+        Commands::Validate { file } => cmd_validate(&file),
     }
 }
 
@@ -160,7 +169,121 @@ fn cmd_serve() -> routines_core::error::Result<()> {
     })
 }
 
+fn cmd_list() -> routines_core::error::Result<()> {
+    use colored::Colorize;
+    use std::io::IsTerminal;
+
+    let is_tty = std::io::stdout().is_terminal();
+    let rdir = routines_dir();
+    let hub_dir = rdir.join("hub");
+    let mut has_required = false;
+    let mut has_output = false;
+
+    if hub_dir.exists() {
+        let entries =
+            routines_core::server::collect_routines_recursive(&hub_dir, "");
+        for (ref_name, routine) in &entries {
+            let inputs_desc = format_inputs_cli(&routine.inputs, &mut has_required);
+            if is_tty {
+                println!("{:<20} — {}{inputs_desc}", ref_name.bold(), routine.description);
+            } else {
+                println!("{ref_name} — {}{inputs_desc}", routine.description);
+            }
+            has_output = true;
+        }
+    }
+
+    let reg_dir = rdir.join("registries");
+    if reg_dir.exists()
+        && let Ok(dirs) = std::fs::read_dir(&reg_dir)
+    {
+        for dir_entry in dirs.flatten() {
+            if dir_entry.path().is_dir() {
+                let reg_name = dir_entry.file_name().to_string_lossy().to_string();
+                let entries =
+                    routines_core::server::collect_routines_recursive(&dir_entry.path(), "");
+                if !entries.is_empty() && has_output {
+                    println!();
+                }
+                for (name, routine) in &entries {
+                    let inputs_desc = format_inputs_cli(&routine.inputs, &mut has_required);
+                    let full_name = format!("@{reg_name}/{name}");
+                    if is_tty {
+                        println!("{:<20} — {}{inputs_desc}", full_name.bold(), routine.description);
+                    } else {
+                        println!("{full_name} — {}{inputs_desc}", routine.description);
+                    }
+                    has_output = true;
+                }
+            }
+        }
+    }
+
+    if has_required {
+        println!("\n(* = required)");
+    }
+
+    if !has_output {
+        println!("No routines found");
+    }
+
+    Ok(())
+}
+
+fn format_inputs_cli(inputs: &[routines_core::parser::InputDef], has_required: &mut bool) -> String {
+    if inputs.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = inputs
+        .iter()
+        .map(|i| {
+            if i.required {
+                *has_required = true;
+                format!("{}*", i.name)
+            } else {
+                i.name.clone()
+            }
+        })
+        .collect();
+    format!(" (inputs: {})", parts.join(", "))
+}
+
+fn cmd_validate(file: &std::path::Path) -> routines_core::error::Result<()> {
+    use colored::Colorize;
+    use std::io::IsTerminal;
+
+    let is_tty = std::io::stdout().is_terminal();
+
+    match Routine::from_file(file) {
+        Ok(routine) => {
+            let steps = routine.steps.len();
+            let inputs = routine.inputs.len();
+            if is_tty {
+                println!(
+                    "{} Valid: {} ({} steps, {} inputs)",
+                    "✓".green(),
+                    routine.name.bold(),
+                    steps,
+                    inputs
+                );
+            } else {
+                println!("Valid: {} ({steps} steps, {inputs} inputs)", routine.name);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if is_tty {
+                eprintln!("{} {e}", "✗".red());
+            } else {
+                eprintln!("Error: {e}");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
 fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::error::Result<()> {
+    use colored::Colorize;
     use std::io::IsTerminal;
 
     // Locate routine YAML
@@ -202,8 +325,8 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::err
     if is_tty {
         eprintln!(
             "Running routine: {} (run_id: {})",
-            routine.name,
-            &run_id[..8]
+            routine.name.bold(),
+            &run_id[..8].dimmed()
         );
     }
 
@@ -230,9 +353,9 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::err
                 (i + 1).to_string(),
                 step.step_id.clone(),
                 match step.status {
-                    StepStatus::Success => "OK".into(),
-                    StepStatus::Failed => "FAIL".into(),
-                    StepStatus::Skipped => "SKIP".into(),
+                    StepStatus::Success => "OK".green().to_string(),
+                    StepStatus::Failed => "FAIL".red().to_string(),
+                    StepStatus::Skipped => "SKIP".yellow().to_string(),
                 },
                 step.exit_code
                     .map(|c| c.to_string())
@@ -252,9 +375,9 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::err
 
         // Result
         match result.status {
-            RunStatus::Success => eprintln!("Result: SUCCESS"),
+            RunStatus::Success => eprintln!("Result: {}", "SUCCESS".green().bold()),
             RunStatus::Failed => {
-                eprintln!("Result: FAILED");
+                eprintln!("Result: {}", "FAILED".red().bold());
                 std::process::exit(1);
             }
         }

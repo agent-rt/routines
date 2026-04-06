@@ -282,7 +282,7 @@ fn text_ok(text: String) -> Result<CallToolResult, ErrorData> {
 
 /// Recursively collect routine YAML files under a directory.
 /// Returns (relative_name, Routine) pairs sorted by name.
-fn collect_routines_recursive(
+pub fn collect_routines_recursive(
     dir: &std::path::Path,
     prefix: &str,
 ) -> Vec<(String, Routine)> {
