@@ -37,6 +37,36 @@ pub enum RunStatus {
     Failed,
 }
 
+/// Patterns that trigger strict_mode rejection.
+const DANGEROUS_PATTERNS: &[&str] = &[
+    "rm -rf",
+    "rm -fr",
+    "mkfs",
+    "dd if=",
+    "> /dev/sd",
+    "chmod 777",
+    ":(){ :|:& };:",
+    "shutdown",
+    "reboot",
+    "init 0",
+    "init 6",
+];
+
+/// Check if a resolved command line contains dangerous patterns.
+fn check_dangerous(step_id: &str, command: &str, args: &[String]) -> Result<()> {
+    let full_command = format!("{} {}", command, args.join(" "));
+    let lower = full_command.to_lowercase();
+    for pattern in DANGEROUS_PATTERNS {
+        if lower.contains(pattern) {
+            return Err(RoutineError::DangerousCommand {
+                step_id: step_id.to_string(),
+                command: full_command,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Execute a full routine with the given inputs and secrets.
 pub fn run_routine(
     routine: &Routine,
@@ -64,7 +94,7 @@ pub fn run_routine(
     let mut step_results = Vec::new();
 
     for step in &routine.steps {
-        let result = execute_step(step, &ctx)?;
+        let result = execute_step(step, &ctx, routine.strict_mode)?;
 
         let status = result.status.clone();
         ctx.add_step_output(
@@ -91,13 +121,18 @@ pub fn run_routine(
 }
 
 /// Execute a single CLI step.
-fn execute_step(step: &Step, ctx: &Context) -> Result<StepResult> {
+fn execute_step(step: &Step, ctx: &Context, strict_mode: bool) -> Result<StepResult> {
     let command = ctx.resolve(&step.command, &step.id)?;
     let args: Vec<String> = step
         .args
         .iter()
         .map(|a| ctx.resolve(a, &step.id))
         .collect::<Result<_>>()?;
+
+    if strict_mode {
+        check_dangerous(&step.id, &command, &args)?;
+    }
+
     let env: HashMap<String, String> = step
         .env
         .iter()
@@ -150,4 +185,61 @@ fn execute_step(step: &Step, ctx: &Context) -> Result<StepResult> {
         stderr,
         execution_time_ms: elapsed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_mode_blocks_rm_rf() {
+        let routine = Routine::from_yaml(
+            r#"
+name: danger
+description: test
+strict_mode: true
+inputs: []
+steps:
+  - id: nuke
+    type: cli
+    command: rm
+    args: ["-rf", "/"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Dangerous command blocked"));
+        assert!(err.contains("rm -rf"));
+    }
+
+    #[test]
+    fn strict_mode_off_allows_anything() {
+        let routine = Routine::from_yaml(
+            r#"
+name: safe
+description: test
+strict_mode: false
+inputs: []
+steps:
+  - id: greet
+    type: cli
+    command: echo
+    args: ["hello"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status, RunStatus::Success);
+    }
+
+    #[test]
+    fn strict_mode_blocks_case_insensitive() {
+        let result = check_dangerous("test", "RM", &["-RF".to_string(), "/".to_string()]);
+        assert!(result.is_err());
+    }
 }

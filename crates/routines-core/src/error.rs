@@ -23,6 +23,9 @@ pub enum RoutineError {
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    #[error("Dangerous command blocked in strict_mode: '{command}' in step '{step_id}'")]
+    DangerousCommand { step_id: String, command: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

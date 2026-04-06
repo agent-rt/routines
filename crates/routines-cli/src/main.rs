@@ -37,6 +37,11 @@ enum Commands {
     },
     /// Start MCP server (stdio transport)
     Serve,
+    /// Show audit log for a routine run
+    Log {
+        /// Run ID (UUID) to display
+        run_id: String,
+    },
 }
 
 fn main() {
@@ -51,6 +56,7 @@ fn dispatch(cli: Cli) -> routines_core::error::Result<()> {
     match cli.command {
         Commands::Run { name, inputs } => cmd_run(&name, &inputs),
         Commands::Serve => cmd_serve(),
+        Commands::Log { run_id } => cmd_log(&run_id),
     }
 }
 
@@ -142,5 +148,58 @@ fn cmd_run(name: &str, raw_inputs: &[String]) -> routines_core::error::Result<()
         }
     }
 
+    Ok(())
+}
+
+fn cmd_log(run_id: &str) -> routines_core::error::Result<()> {
+    let db = AuditDb::open(&routines_dir().join("data.db"))?;
+
+    let log = db.get_run_log(run_id)?;
+    let Some(log) = log else {
+        eprintln!("Run not found: {run_id}");
+        std::process::exit(1);
+    };
+
+    // Header
+    println!("Routine: {}", log.routine_name);
+    println!("Run ID:  {}", log.run_id);
+    println!("Status:  {}", log.status);
+    println!("Started: {}", log.started_at);
+    if let Some(ended) = &log.ended_at {
+        println!("Ended:   {ended}");
+    }
+    if let Some(inputs) = &log.input_vars
+        && inputs != "{}"
+    {
+        println!("Inputs:  {inputs}");
+    }
+    println!("{}", "-".repeat(60));
+
+    // Steps
+    for (i, step) in log.steps.iter().enumerate() {
+        let icon = if step.status == "SUCCESS" { "OK" } else { "FAIL" };
+        println!(
+            "\n[{icon}] Step {num}: {id}  (exit={exit}, {ms}ms)",
+            num = i + 1,
+            id = step.step_id,
+            exit = step.exit_code.unwrap_or(-1),
+            ms = step.execution_time_ms,
+        );
+
+        if let Some(stdout) = &step.stdout {
+            let trimmed = stdout.trim();
+            if !trimmed.is_empty() {
+                println!("  stdout: {trimmed}");
+            }
+        }
+        if let Some(stderr) = &step.stderr {
+            let trimmed = stderr.trim();
+            if !trimmed.is_empty() {
+                println!("  stderr: {trimmed}");
+            }
+        }
+    }
+
+    println!();
     Ok(())
 }
