@@ -4,5 +4,7 @@ pub mod error;
 pub mod executor;
 pub mod mcp_config;
 pub mod parser;
+pub mod registry;
+pub mod resolve;
 pub mod secrets;
 pub mod server;

@@ -13,6 +13,8 @@ use crate::audit::AuditDb;
 use crate::executor::{self, RunStatus, StepStatus};
 use crate::mcp_config::{McpConfig, McpServerConfig};
 use crate::parser::{Routine, StepAction};
+use crate::registry::{self, Registries, RegistryConfig};
+use crate::resolve::resolve_routine_path;
 use crate::secrets;
 
 fn routines_dir() -> PathBuf {
@@ -92,6 +94,22 @@ pub struct ManageMcpServersParams {
     pub env: Option<HashMap<String, String>>,
 }
 
+/// Parameter struct for manage_registries
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ManageRegistriesParams {
+    /// Action to perform: "list", "add", "remove", "sync"
+    pub action: String,
+    /// Registry name (required for add, remove, sync with specific name)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Git repository URL (required for add)
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Git branch or tag (optional for add, default: main)
+    #[serde(default)]
+    pub git_ref: Option<String>,
+}
+
 /// Parameter struct for dry_run_routine
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DryRunRoutineParams {
@@ -140,7 +158,7 @@ Step (type: http):
   body: String (optional) — request body, supports templates
 
 Step (type: routine):
-  name: String (required) — name of routine to invoke from hub
+  name: String (required) — routine reference: 'name', 'namespace/name', or '@registry/name'
   inputs: map of String→String (default: {}) — input parameters, supports templates
 
 Step (type: mcp):
@@ -180,6 +198,67 @@ fn text_ok(text: String) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
+/// Recursively collect routine YAML files under a directory.
+/// Returns (relative_name, Routine) pairs sorted by name.
+fn collect_routines_recursive(
+    dir: &std::path::Path,
+    prefix: &str,
+) -> Vec<(String, Routine)> {
+    let mut results = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return results;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            // Skip hidden directories (.git, etc.)
+            if dir_name.starts_with('.') {
+                continue;
+            }
+            let sub_prefix = if prefix.is_empty() {
+                dir_name
+            } else {
+                format!("{prefix}/{dir_name}")
+            };
+            results.extend(collect_routines_recursive(&path, &sub_prefix));
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext == "yml" || ext == "yaml")
+            && let Ok(routine) = Routine::from_file(&path)
+        {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            let ref_name = if prefix.is_empty() {
+                stem.to_string()
+            } else {
+                format!("{prefix}/{stem}")
+            };
+            results.push((ref_name, routine));
+        }
+    }
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+/// Format input descriptions for list output.
+fn format_inputs(inputs: &[crate::parser::InputDef], has_required: &mut bool) -> String {
+    if inputs.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = inputs
+        .iter()
+        .map(|i| {
+            if i.required {
+                *has_required = true;
+                format!("{}*", i.name)
+            } else {
+                i.name.clone()
+            }
+        })
+        .collect();
+    format!(" (inputs: {})", parts.join(", "))
+}
+
 #[tool_router]
 impl RoutinesMcpServer {
     pub fn new() -> Self {
@@ -190,48 +269,47 @@ impl RoutinesMcpServer {
 
     #[tool(description = "List all available routines with their input schemas")]
     async fn list_routines(&self) -> Result<CallToolResult, ErrorData> {
-        let hub_dir = routines_dir().join("hub");
+        let rdir = routines_dir();
         let mut out = String::new();
+        let mut has_required = false;
 
+        // Scan hub/ (local routines with namespace support)
+        let hub_dir = rdir.join("hub");
         if hub_dir.exists() {
-            let entries = std::fs::read_dir(&hub_dir)
-                .map_err(|e| err_internal(format!("Failed to read hub: {e}")))?;
+            let entries = collect_routines_recursive(&hub_dir, "");
+            for (ref_name, routine) in &entries {
+                let inputs_desc = format_inputs(&routine.inputs, &mut has_required);
+                let _ = writeln!(out, "{ref_name} — {}{inputs_desc}", routine.description);
+            }
+        }
 
-            let mut has_required = false;
-            for entry in entries.flatten() {
-                let path: PathBuf = entry.path();
-                if path
-                    .extension()
-                    .is_some_and(|ext| ext == "yml" || ext == "yaml")
-                    && let Ok(routine) = Routine::from_file(&path)
-                {
-                    let inputs_desc = if routine.inputs.is_empty() {
-                        String::new()
-                    } else {
-                        let parts: Vec<String> = routine
-                            .inputs
-                            .iter()
-                            .map(|i| {
-                                if i.required {
-                                    has_required = true;
-                                    format!("{}*", i.name)
-                                } else {
-                                    i.name.clone()
-                                }
-                            })
-                            .collect();
-                        format!(" (inputs: {})", parts.join(", "))
-                    };
-                    let _ = writeln!(
-                        out,
-                        "{} — {}{}",
-                        routine.name, routine.description, inputs_desc
-                    );
+        // Scan registries/
+        let reg_dir = rdir.join("registries");
+        if reg_dir.exists()
+            && let Ok(dirs) = std::fs::read_dir(&reg_dir)
+        {
+            for dir_entry in dirs.flatten() {
+                if dir_entry.path().is_dir() {
+                    let reg_name = dir_entry.file_name().to_string_lossy().to_string();
+                    let entries = collect_routines_recursive(&dir_entry.path(), "");
+                    if !entries.is_empty() && !out.is_empty() {
+                        let _ = writeln!(out);
+                    }
+                    for (name, routine) in &entries {
+                        let inputs_desc =
+                            format_inputs(&routine.inputs, &mut has_required);
+                        let _ = writeln!(
+                            out,
+                            "@{reg_name}/{name} — {}{inputs_desc}",
+                            routine.description
+                        );
+                    }
                 }
             }
-            if has_required {
-                let _ = write!(out, "(* = required)");
-            }
+        }
+
+        if has_required {
+            let _ = write!(out, "\n(* = required)");
         }
 
         if out.is_empty() {
@@ -251,9 +329,7 @@ impl RoutinesMcpServer {
         &self,
         Parameters(params): Parameters<GetRoutineParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let yaml_path = routines_dir()
-            .join("hub")
-            .join(format!("{}.yml", params.name));
+        let yaml_path = resolve_routine_path(&params.name, &routines_dir());
         if !yaml_path.exists() {
             return Err(err_params(format!("Routine '{}' not found", params.name)));
         }
@@ -493,9 +569,7 @@ impl RoutinesMcpServer {
         &self,
         Parameters(params): Parameters<RunRoutineParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let yaml_path = routines_dir()
-            .join("hub")
-            .join(format!("{}.yml", params.name));
+        let yaml_path = resolve_routine_path(&params.name, &routines_dir());
         if !yaml_path.exists() {
             return Err(err_params(format!("Routine '{}' not found", params.name)));
         }
@@ -596,11 +670,11 @@ impl RoutinesMcpServer {
         let _routine = Routine::from_yaml(&params.yaml_content)
             .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
 
-        let hub_dir = routines_dir().join("hub");
-        std::fs::create_dir_all(&hub_dir)
-            .map_err(|e| err_internal(format!("Failed to create hub dir: {e}")))?;
-
-        let file_path = hub_dir.join(format!("{}.yml", params.name));
+        let file_path = resolve_routine_path(&params.name, &routines_dir());
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| err_internal(format!("Failed to create dir: {e}")))?;
+        }
         std::fs::write(&file_path, &params.yaml_content)
             .map_err(|e| err_internal(format!("Failed to write file: {e}")))?;
 
@@ -789,6 +863,91 @@ impl RoutinesMcpServer {
             ))),
         }
     }
+
+    #[tool(
+        description = "Manage routine registries (remote sources). Actions: list, add (name+url), remove (name), sync (name or all)"
+    )]
+    async fn manage_registries(
+        &self,
+        Parameters(params): Parameters<ManageRegistriesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let rdir = routines_dir();
+
+        match params.action.as_str() {
+            "list" => {
+                let config = Registries::load(&rdir)
+                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
+                if config.registries.is_empty() {
+                    return text_ok("No registries configured".to_string());
+                }
+                let mut out = String::new();
+                for (name, reg) in &config.registries {
+                    let synced = if rdir.join("registries").join(name).join(".git").exists() {
+                        "synced"
+                    } else {
+                        "not synced"
+                    };
+                    let _ = writeln!(out, "@{name}: {} ({}) [{synced}]", reg.url, reg.git_ref);
+                }
+                text_ok(out.trim().to_string())
+            }
+            "add" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' is required for add".into()))?;
+                let url = params
+                    .url
+                    .ok_or_else(|| err_params("'url' is required for add".into()))?;
+                let git_ref = params.git_ref.unwrap_or_else(|| "main".to_string());
+                let mut config = Registries::load(&rdir)
+                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
+                config.add(name.clone(), RegistryConfig { url, git_ref });
+                config
+                    .save(&rdir)
+                    .map_err(|e| err_internal(format!("Save error: {e}")))?;
+                text_ok(format!("Added registry '@{name}'. Use sync to fetch."))
+            }
+            "remove" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' is required for remove".into()))?;
+                let mut config = Registries::load(&rdir)
+                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
+                if !config.remove(&name) {
+                    return Err(err_params(format!("Registry '{name}' not found")));
+                }
+                config
+                    .save(&rdir)
+                    .map_err(|e| err_internal(format!("Save error: {e}")))?;
+                registry::remove_registry_files(&name, &rdir)
+                    .map_err(|e| err_internal(format!("Cleanup error: {e}")))?;
+                text_ok(format!("Removed registry '@{name}'"))
+            }
+            "sync" => {
+                if let Some(name) = params.name {
+                    let config = Registries::load(&rdir)
+                        .map_err(|e| err_internal(format!("Config error: {e}")))?;
+                    let reg = config
+                        .get(&name)
+                        .ok_or_else(|| err_params(format!("Registry '{name}' not found")))?;
+                    let msg = registry::sync_registry(&name, reg, &rdir)
+                        .map_err(|e| err_internal(format!("Sync error: {e}")))?;
+                    text_ok(msg)
+                } else {
+                    let results = registry::sync_all(&rdir)
+                        .map_err(|e| err_internal(format!("Sync error: {e}")))?;
+                    if results.is_empty() {
+                        text_ok("No registries to sync".to_string())
+                    } else {
+                        text_ok(results.join("\n"))
+                    }
+                }
+            }
+            other => Err(err_params(format!(
+                "Unknown action '{other}'. Use: list, add, remove, sync"
+            ))),
+        }
+    }
 }
 
 /// Test connection to an MCP server: spawn → initialize → list_tools → close.
@@ -842,7 +1001,8 @@ impl ServerHandler for RoutinesMcpServer {
              get_routine → read source, validate_routine → check YAML, \
              dry_run_routine → preview commands, run_routine → execute, \
              create_routine → save, get_run_log → inspect, \
-             manage_mcp_servers → configure MCP servers (list/add/remove/get)."
+             manage_mcp_servers → configure MCP servers (list/add/remove/get), \
+             manage_registries → remote routine sources (list/add/remove/sync)."
                 .into(),
         );
         info

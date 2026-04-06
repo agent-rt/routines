@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::context::Context;
 use crate::error::Result;
 use crate::parser::Routine;
+use crate::resolve::resolve_routine_path;
 
 use super::{StepResult, StepStatus, run_routine_with_depth};
 
@@ -34,11 +35,8 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
         });
     }
 
-    // Load sub-routine from hub
-    let yaml_path = params
-        .routines_dir
-        .join("hub")
-        .join(format!("{}.yml", params.name));
+    // Load sub-routine
+    let yaml_path = resolve_routine_path(params.name, params.routines_dir);
     if !yaml_path.exists() {
         return Ok(StepResult {
             step_id: params.step_id.to_string(),
