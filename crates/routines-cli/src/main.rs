@@ -290,6 +290,23 @@ fn prompt_missing_inputs(
 
     let mut result = provided.clone();
 
+    // Check if any required inputs are missing — if not, skip prompting entirely
+    let has_missing_required = inputs_def
+        .iter()
+        .any(|i| i.required && !result.contains_key(&i.name));
+
+    if !has_missing_required {
+        // All required provided — just apply defaults for optional fields silently
+        for input in inputs_def {
+            if !result.contains_key(&input.name)
+                && let Some(def) = &input.default
+            {
+                result.insert(input.name.clone(), def.clone());
+            }
+        }
+        return Ok(result);
+    }
+
     for input in inputs_def {
         if result.contains_key(&input.name) {
             continue;
