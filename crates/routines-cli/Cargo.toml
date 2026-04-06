@@ -16,3 +16,4 @@ chrono = { workspace = true }
 rmcp = { workspace = true }
 tokio = { workspace = true }
 dotenvy = { workspace = true }
+comfy-table = { workspace = true }

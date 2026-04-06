@@ -15,6 +15,21 @@ pub struct Routine {
     /// Cleanup steps that always execute after main steps, regardless of success/failure.
     #[serde(default)]
     pub finally: Vec<Step>,
+    /// Output template expression, resolved after all steps complete.
+    #[serde(default)]
+    pub output: Option<String>,
+    /// Output format hint for CLI rendering.
+    #[serde(default)]
+    pub output_format: OutputFormat,
+}
+
+/// Output format for CLI rendering.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    #[default]
+    Plain,
+    Table,
 }
 
 /// Input parameter declaration.
@@ -691,5 +706,62 @@ finally:
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("conflicts"));
+    }
+
+    #[test]
+    fn parse_output_field() {
+        let routine = Routine::from_yaml(
+            r#"
+name: with_output
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+    args: ["hello"]
+output: "{{ run.stdout }}"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.output.as_deref(), Some("{{ run.stdout }}"));
+        assert_eq!(routine.output_format, OutputFormat::Plain);
+    }
+
+    #[test]
+    fn parse_output_format_table() {
+        let routine = Routine::from_yaml(
+            r#"
+name: with_table
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+output: "{{ run.stdout }}"
+output_format: table
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.output_format, OutputFormat::Table);
+    }
+
+    #[test]
+    fn no_output_is_none() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_output
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert!(routine.output.is_none());
+        assert_eq!(routine.output_format, OutputFormat::Plain);
     }
 }

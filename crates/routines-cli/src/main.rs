@@ -38,6 +38,9 @@ enum Commands {
     Run {
         /// Routine name (looks up ~/.routines/hub/<name>.yml)
         name: String,
+        /// Only output the routine's output field, no chrome
+        #[arg(short, long)]
+        quiet: bool,
         /// Input key=value pairs
         #[arg(trailing_var_arg = true)]
         inputs: Vec<String>,
@@ -48,6 +51,9 @@ enum Commands {
     Log {
         /// Run ID (UUID) to display
         run_id: String,
+        /// Show full stdout/stderr without truncation
+        #[arg(long)]
+        full: bool,
     },
     /// Manage MCP server configurations
     Mcp {
@@ -126,9 +132,13 @@ fn main() {
 
 fn dispatch(cli: Cli) -> routines_core::error::Result<()> {
     match cli.command {
-        Commands::Run { name, inputs } => cmd_run(&name, &inputs),
+        Commands::Run {
+            name,
+            quiet,
+            inputs,
+        } => cmd_run(&name, &inputs, quiet),
         Commands::Serve => cmd_serve(),
-        Commands::Log { run_id } => cmd_log(&run_id),
+        Commands::Log { run_id, full } => cmd_log(&run_id, full),
         Commands::Mcp { action } => cmd_mcp(action),
         Commands::Registry { action } => cmd_registry(action),
     }
@@ -150,7 +160,9 @@ fn cmd_serve() -> routines_core::error::Result<()> {
     })
 }
 
-fn cmd_run(name: &str, raw_inputs: &[String]) -> routines_core::error::Result<()> {
+fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool) -> routines_core::error::Result<()> {
+    use std::io::IsTerminal;
+
     // Locate routine YAML
     let yaml_path = resolve_routine_path(name, &routines_dir());
     if !yaml_path.exists() {
@@ -159,6 +171,7 @@ fn cmd_run(name: &str, raw_inputs: &[String]) -> routines_core::error::Result<()
     }
 
     let routine = Routine::from_file(&yaml_path)?;
+    let is_tty = std::io::stdout().is_terminal() && !quiet;
 
     // Parse KEY=VALUE inputs
     let inputs: HashMap<String, String> = raw_inputs
@@ -186,8 +199,13 @@ fn cmd_run(name: &str, raw_inputs: &[String]) -> routines_core::error::Result<()
 
     db.insert_run(&run_id, &routine.name, &input_vars_redacted, &started_at)?;
 
-    println!("Running routine: {} (run_id: {})", routine.name, run_id);
-    println!("---");
+    if is_tty {
+        eprintln!(
+            "Running routine: {} (run_id: {})",
+            routine.name,
+            &run_id[..8]
+        );
+    }
 
     // Execute
     let result = executor::run_routine(&routine, inputs, secrets.clone())?;
@@ -196,29 +214,59 @@ fn cmd_run(name: &str, raw_inputs: &[String]) -> routines_core::error::Result<()
     for step in &result.step_results {
         let step_started = chrono::Utc::now().to_rfc3339();
         db.insert_step_log(&run_id, step, &secret_values, &step_started)?;
-
-        let icon = match step.status {
-            StepStatus::Success => "OK",
-            StepStatus::Failed => "FAIL",
-            StepStatus::Skipped => "SKIP",
-        };
-        println!(
-            "[{icon}] {step_id} (exit={exit}, {ms}ms)",
-            step_id = step.step_id,
-            exit = step.exit_code.unwrap_or(-1),
-            ms = step.execution_time_ms,
-        );
     }
 
     // Finalize run
     let ended_at = chrono::Utc::now().to_rfc3339();
     db.finalize_run(&run_id, &result, &ended_at)?;
 
-    println!("---");
-    match result.status {
-        RunStatus::Success => println!("Result: SUCCESS"),
-        RunStatus::Failed => {
-            println!("Result: FAILED");
+    if is_tty {
+        // Step summary table
+        let mut table = comfy_table::Table::new();
+        table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+        table.set_header(vec!["#", "Step", "Status", "Exit", "Time"]);
+        for (i, step) in result.step_results.iter().enumerate() {
+            table.add_row(vec![
+                (i + 1).to_string(),
+                step.step_id.clone(),
+                match step.status {
+                    StepStatus::Success => "OK".into(),
+                    StepStatus::Failed => "FAIL".into(),
+                    StepStatus::Skipped => "SKIP".into(),
+                },
+                step.exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or("-".into()),
+                format!("{}ms", step.execution_time_ms),
+            ]);
+        }
+        eprintln!("{table}");
+
+        // Output
+        if let Some(output) = &result.output {
+            let trimmed = output.trim();
+            if !trimmed.is_empty() {
+                render_output(trimmed, &routine.output_format, true);
+            }
+        }
+
+        // Result
+        match result.status {
+            RunStatus::Success => eprintln!("Result: SUCCESS"),
+            RunStatus::Failed => {
+                eprintln!("Result: FAILED");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Pipe mode: only output
+        if let Some(output) = &result.output {
+            let trimmed = output.trim();
+            if !trimmed.is_empty() {
+                render_output(trimmed, &routine.output_format, false);
+            }
+        }
+        if result.status == RunStatus::Failed {
             std::process::exit(1);
         }
     }
@@ -226,7 +274,71 @@ fn cmd_run(name: &str, raw_inputs: &[String]) -> routines_core::error::Result<()
     Ok(())
 }
 
-fn cmd_log(run_id: &str) -> routines_core::error::Result<()> {
+/// Render output according to format. TTY: comfy-table for table format. Pipe: TSV.
+fn render_output(
+    output: &str,
+    format: &routines_core::parser::OutputFormat,
+    is_tty: bool,
+) {
+    use routines_core::parser::OutputFormat;
+
+    match format {
+        OutputFormat::Table => {
+            // Try to parse as JSON array of objects
+            if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(output) {
+                if rows.is_empty() {
+                    println!("(empty)");
+                    return;
+                }
+                // Collect column names from first row
+                let columns: Vec<&String> = rows[0].keys().collect();
+
+                if is_tty {
+                    let mut table = comfy_table::Table::new();
+                    table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+                    table.set_header(columns.iter().map(|c| c.as_str()));
+                    for row in &rows {
+                        let cells: Vec<String> = columns
+                            .iter()
+                            .map(|col| match row.get(*col) {
+                                Some(serde_json::Value::String(s)) => s.clone(),
+                                Some(v) => v.to_string(),
+                                None => String::new(),
+                            })
+                            .collect();
+                        table.add_row(cells);
+                    }
+                    println!("{table}");
+                } else {
+                    // TSV output
+                    println!(
+                        "{}",
+                        columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join("\t")
+                    );
+                    for row in &rows {
+                        let cells: Vec<String> = columns
+                            .iter()
+                            .map(|col| match row.get(*col) {
+                                Some(serde_json::Value::String(s)) => s.clone(),
+                                Some(v) => v.to_string(),
+                                None => String::new(),
+                            })
+                            .collect();
+                        println!("{}", cells.join("\t"));
+                    }
+                }
+            } else {
+                // Not valid JSON array, fallback to plain
+                println!("{output}");
+            }
+        }
+        OutputFormat::Plain => {
+            println!("{output}");
+        }
+    }
+}
+
+fn cmd_log(run_id: &str, full: bool) -> routines_core::error::Result<()> {
     let db = AuditDb::open(&routines_dir().join("data.db"))?;
 
     let log = db.get_run_log(run_id)?;
@@ -251,6 +363,8 @@ fn cmd_log(run_id: &str) -> routines_core::error::Result<()> {
     println!("{}", "-".repeat(60));
 
     // Steps
+    let max_lines = if full { usize::MAX } else { 10 };
+
     for (i, step) in log.steps.iter().enumerate() {
         let icon = if step.status == "SUCCESS" {
             "OK"
@@ -272,14 +386,24 @@ fn cmd_log(run_id: &str) -> routines_core::error::Result<()> {
         if let Some(stdout) = &step.stdout {
             let trimmed = stdout.trim();
             if !trimmed.is_empty() {
-                println!("  stdout: {trimmed}");
+                print_truncated("  stdout: ", trimmed, max_lines);
             }
         }
         if let Some(stderr) = &step.stderr {
             let trimmed = stderr.trim();
             if !trimmed.is_empty() {
-                println!("  stderr: {trimmed}");
+                print_truncated("  stderr: ", trimmed, max_lines);
             }
+        }
+    }
+
+    // Output
+    if let Some(output) = &log.output {
+        let trimmed = output.trim();
+        if !trimmed.is_empty() {
+            println!("\n{}", "-".repeat(60));
+            println!("Output:");
+            println!("{trimmed}");
         }
     }
 
@@ -295,6 +419,25 @@ fn cmd_log(run_id: &str) -> routines_core::error::Result<()> {
 
     println!();
     Ok(())
+}
+
+/// Print text with optional line truncation.
+fn print_truncated(prefix: &str, text: &str, max_lines: usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max_lines {
+        println!("{prefix}{text}");
+    } else {
+        for (i, line) in lines.iter().enumerate() {
+            if i == 0 {
+                println!("{prefix}{line}");
+            } else if i < max_lines {
+                println!("  {line}");
+            } else {
+                println!("  ... ({} more lines, use --full to show all)", lines.len() - max_lines);
+                break;
+            }
+        }
+    }
 }
 
 fn cmd_mcp(action: McpAction) -> routines_core::error::Result<()> {

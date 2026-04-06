@@ -130,6 +130,8 @@ Top-level fields:
   inputs: list of InputDef (default: [])
   steps: list of Step (required)
   finally: list of Step (default: []) — cleanup steps, always run after main steps regardless of success/failure
+  output: String (optional) — template expression resolved after all steps, returned as routine result
+  output_format: plain|table (default: plain) — table expects JSON array, renders as table in CLI
 
 InputDef:
   name: String (required)
@@ -195,6 +197,46 @@ Example:
       command: echo
       args: [\"Hello {{ inputs.who }}\"]
 ";
+
+/// Render output for MCP responses. Table format converts JSON array to compact text.
+fn render_output_for_mcp(output: &str, format: &crate::parser::OutputFormat) -> String {
+    use crate::parser::OutputFormat;
+
+    if *format != OutputFormat::Table {
+        return output.to_string();
+    }
+
+    // Try to parse as JSON array of objects
+    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(output)
+    else {
+        return output.to_string();
+    };
+
+    if rows.is_empty() {
+        return "(empty)".to_string();
+    }
+
+    let columns: Vec<&String> = rows[0].keys().collect();
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+
+    // Header
+    lines.push(columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(" "));
+
+    // Rows
+    for row in &rows {
+        let cells: Vec<String> = columns
+            .iter()
+            .map(|col| match row.get(*col) {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(v) => v.to_string(),
+                None => String::new(),
+            })
+            .collect();
+        lines.push(cells.join(" "));
+    }
+
+    lines.join("\n")
+}
 
 fn err_internal(msg: String) -> ErrorData {
     ErrorData::internal_error(msg, None)
@@ -617,6 +659,14 @@ impl RoutinesMcpServer {
             }
         }
 
+        // Show output declaration
+        if let Some(output_template) = &routine.output {
+            let _ = writeln!(out, "\nOutput: {output_template}");
+            if routine.output_format != crate::parser::OutputFormat::Plain {
+                let _ = writeln!(out, "Format: {:?}", routine.output_format);
+            }
+        }
+
         text_ok(out.trim().to_string())
     }
 
@@ -672,11 +722,23 @@ impl RoutinesMcpServer {
 
         match result.status {
             RunStatus::Success => {
-                // Compact: one-line summary
+                // Compact: one-line summary + output
                 let _ = write!(
                     out,
                     "run={short_id} SUCCESS {total_ms}ms {total_steps}/{total_steps} steps"
                 );
+                if let Some(output) = &result.output {
+                    let trimmed = output.trim();
+                    if !trimmed.is_empty() {
+                        let rendered = render_output_for_mcp(trimmed, &result.output_format);
+                        let _ = write!(out, "\n---\n");
+                        if rendered.len() > 2000 {
+                            let _ = write!(out, "{}... (truncated)", &rendered[..2000]);
+                        } else {
+                            let _ = write!(out, "{rendered}");
+                        }
+                    }
+                }
             }
             RunStatus::Failed => {
                 // Expand: show each step, with stderr on failed step
@@ -796,6 +858,13 @@ impl RoutinesMcpServer {
                 if !trimmed.is_empty() {
                     let _ = writeln!(out, "  stderr: {trimmed}");
                 }
+            }
+        }
+
+        if let Some(output) = &log.output {
+            let trimmed = output.trim();
+            if !trimmed.is_empty() {
+                let _ = writeln!(out, "---\nOutput:\n{trimmed}");
             }
         }
 

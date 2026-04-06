@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, Condvar};
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
-use crate::parser::{BackoffStrategy, OnFail, Routine, Step, StepAction};
+use crate::parser::{BackoffStrategy, OnFail, OutputFormat, Routine, Step, StepAction};
 
 /// Result of executing a single step.
 #[derive(Debug, Clone)]
@@ -34,6 +34,10 @@ pub enum StepStatus {
 pub struct RunResult {
     pub status: RunStatus,
     pub step_results: Vec<StepResult>,
+    /// Resolved output template, if declared in routine.
+    pub output: Option<String>,
+    /// Output format hint from routine declaration.
+    pub output_format: OutputFormat,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -391,6 +395,13 @@ fn execute_step_with_foreach(
     Ok(results)
 }
 
+/// Resolve the routine's output template, if declared.
+fn resolve_output(routine: &Routine, ctx: &Context) -> Option<String> {
+    routine.output.as_ref().and_then(|template| {
+        ctx.resolve(template, "_output").ok()
+    })
+}
+
 /// Execute finally steps sequentially. Always runs, regardless of main step results.
 /// Finally step failures are recorded but do not change the run status.
 fn run_finally(
@@ -490,9 +501,12 @@ fn run_sequential(
                 // Run finally before returning
                 let run_status = RunStatus::Failed;
                 run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+                let output = resolve_output(routine, &ctx);
                 return Ok(RunResult {
                     status: run_status,
                     step_results,
+                    output,
+                    output_format: routine.output_format.clone(),
                 });
             }
         }
@@ -505,10 +519,13 @@ fn run_sequential(
     };
 
     run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+    let output = resolve_output(routine, &ctx);
 
     Ok(RunResult {
         status: run_status,
         step_results,
+        output,
+        output_format: routine.output_format.clone(),
     })
 }
 
@@ -732,10 +749,13 @@ fn run_dag(
         .map(|m| m.into_inner().unwrap())
         .unwrap_or_else(|arc| arc.lock().unwrap().clone());
     run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+    let output = resolve_output(routine, &ctx);
 
     Ok(RunResult {
         status: run_status,
         step_results,
+        output,
+        output_format: routine.output_format.clone(),
     })
 }
 
@@ -1662,5 +1682,69 @@ finally:
         let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
         assert_eq!(result.status, RunStatus::Success);
         assert!(result.step_results[1].stdout.contains("result=42"));
+    }
+
+    #[test]
+    fn output_resolves_template() {
+        let routine = Routine::from_yaml(
+            r#"
+name: output_test
+description: test
+steps:
+  - id: greet
+    type: cli
+    command: echo
+    args: ["world"]
+output: "Hello {{ greet.stdout }}"
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.output.as_deref(), Some("Hello world"));
+    }
+
+    #[test]
+    fn output_multi_step_combination() {
+        let routine = Routine::from_yaml(
+            r#"
+name: output_multi
+description: test
+steps:
+  - id: a
+    type: cli
+    command: echo
+    args: ["foo"]
+  - id: b
+    type: cli
+    command: echo
+    args: ["bar"]
+output: "{{ a.stdout }}+{{ b.stdout }}"
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.output.as_deref(), Some("foo+bar"));
+    }
+
+    #[test]
+    fn no_output_is_none() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_output
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+    args: ["hello"]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert!(result.output.is_none());
     }
 }

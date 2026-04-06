@@ -34,6 +34,7 @@ const MIGRATIONS: &str = "
 -- Add token columns if missing (idempotent)
 ALTER TABLE step_logs ADD COLUMN stdout_tokens INTEGER;
 ALTER TABLE step_logs ADD COLUMN stderr_tokens INTEGER;
+ALTER TABLE routine_runs ADD COLUMN output TEXT;
 ";
 
 /// Audit database backed by SQLite.
@@ -107,15 +108,15 @@ impl AuditDb {
         Ok(())
     }
 
-    /// Finalize a run record with end status and timestamp.
+    /// Finalize a run record with end status, timestamp, and output.
     pub fn finalize_run(&self, run_id: &str, result: &RunResult, ended_at: &str) -> Result<()> {
         let status = match result.status {
             RunStatus::Success => "SUCCESS",
             RunStatus::Failed => "FAILED",
         };
         self.conn.execute(
-            "UPDATE routine_runs SET status = ?1, ended_at = ?2 WHERE id = ?3",
-            rusqlite::params![status, ended_at, run_id],
+            "UPDATE routine_runs SET status = ?1, ended_at = ?2, output = ?3 WHERE id = ?4",
+            rusqlite::params![status, ended_at, result.output, run_id],
         )?;
         Ok(())
     }
@@ -123,7 +124,7 @@ impl AuditDb {
     /// Query a run and its step logs by run_id.
     pub fn get_run_log(&self, run_id: &str) -> Result<Option<RunLog>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, routine_name, status, input_vars, started_at, ended_at FROM routine_runs WHERE id = ?1",
+            "SELECT id, routine_name, status, input_vars, started_at, ended_at, output FROM routine_runs WHERE id = ?1",
         )?;
         let run = stmt
             .query_row(rusqlite::params![run_id], |row| {
@@ -134,6 +135,7 @@ impl AuditDb {
                     input_vars: row.get(3)?,
                     started_at: row.get(4)?,
                     ended_at: row.get(5)?,
+                    output: row.get(6).unwrap_or(None),
                     steps: Vec::new(),
                 })
             })
@@ -175,6 +177,7 @@ pub struct RunLog {
     pub input_vars: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
+    pub output: Option<String>,
     pub steps: Vec<StepLog>,
 }
 
