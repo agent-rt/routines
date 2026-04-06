@@ -11,9 +11,7 @@ use serde::Deserialize;
 
 use crate::audit::AuditDb;
 use crate::executor::{self, RunStatus, StepStatus};
-use crate::mcp_config::{McpConfig, McpServerConfig};
 use crate::parser::{Routine, StepAction};
-use crate::registry::{self, Registries, RegistryConfig};
 use crate::resolve::resolve_routine_path;
 use crate::secrets;
 
@@ -38,86 +36,29 @@ pub struct RoutinesMcpServer {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunRoutineParams {
-    /// Routine name (matches filename in hub without .yml extension)
+    /// Routine name
     pub name: String,
-    /// Key-value input parameters for the routine
+    /// Input key-value pairs
     #[serde(default)]
     pub inputs: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct CreateRoutineParams {
-    /// Routine name (will be saved as <name>.yml in hub)
-    pub name: String,
-    /// Human-readable description of what this routine does
-    pub description: String,
-    /// Complete YAML content of the routine definition
-    pub yaml_content: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GetRunLogParams {
-    /// The UUID run_id to retrieve logs for
-    pub run_id: String,
-}
-
-/// Parameter struct for get_routine
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GetRoutineParams {
-    /// Routine name (matches filename in hub without .yml extension)
-    pub name: String,
-}
-
-/// Parameter struct for validate_routine
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ValidateRoutineParams {
-    /// Complete YAML content to validate
-    pub yaml_content: String,
-}
-
-/// Parameter struct for manage_mcp_servers
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ManageMcpServersParams {
-    /// Action to perform: "list", "add", "remove", "get"
+pub struct ManageRoutineParams {
+    /// Action: schema, get, create, validate, dry_run
     pub action: String,
-    /// Server name (required for add, remove, get)
+    /// Routine name (for get/create)
     #[serde(default)]
     pub name: Option<String>,
-    /// Command to start the MCP server (required for add)
+    /// Description (for create)
     #[serde(default)]
-    pub command: Option<String>,
-    /// Arguments for the command (optional, for add)
+    pub description: Option<String>,
+    /// YAML content (for create/validate/dry_run)
     #[serde(default)]
-    pub args: Option<Vec<String>>,
-    /// Environment variables (optional, for add). Values support {{ secrets.X }} templates.
+    pub yaml_content: Option<String>,
+    /// Sample inputs (for dry_run)
     #[serde(default)]
-    pub env: Option<HashMap<String, String>>,
-}
-
-/// Parameter struct for manage_registries
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ManageRegistriesParams {
-    /// Action to perform: "list", "add", "remove", "sync"
-    pub action: String,
-    /// Registry name (required for add, remove, sync with specific name)
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Git repository URL (required for add)
-    #[serde(default)]
-    pub url: Option<String>,
-    /// Git branch or tag (optional for add, default: main)
-    #[serde(default)]
-    pub git_ref: Option<String>,
-}
-
-/// Parameter struct for dry_run_routine
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct DryRunRoutineParams {
-    /// Complete YAML content of the routine
-    pub yaml_content: String,
-    /// Sample input parameters for template resolution
-    #[serde(default)]
-    pub inputs: HashMap<String, String>,
+    pub inputs: Option<HashMap<String, String>>,
 }
 
 const DSL_SCHEMA: &str = "\
@@ -349,8 +290,8 @@ impl RoutinesMcpServer {
         }
     }
 
-    #[tool(description = "List all available routines with their input schemas")]
-    async fn list_routines(&self) -> Result<CallToolResult, ErrorData> {
+    #[tool(description = "List routines with input schemas")]
+    async fn list(&self) -> Result<CallToolResult, ErrorData> {
         let rdir = routines_dir();
         let mut out = String::new();
         let mut has_required = false;
@@ -401,58 +342,84 @@ impl RoutinesMcpServer {
         text_ok(out.trim().to_string())
     }
 
-    #[tool(description = "Return the YAML DSL reference: fields, types, template syntax, example")]
-    async fn get_dsl_schema(&self) -> Result<CallToolResult, ErrorData> {
-        text_ok(DSL_SCHEMA.trim().to_string())
-    }
-
-    #[tool(description = "Read an existing routine's YAML source by name")]
-    async fn get_routine(
+    #[tool(description = "Get DSL schema, read/create/validate/dry-run routines")]
+    async fn manage(
         &self,
-        Parameters(params): Parameters<GetRoutineParams>,
+        Parameters(params): Parameters<ManageRoutineParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let yaml_path = resolve_routine_path(&params.name, &routines_dir());
-        if !yaml_path.exists() {
-            return Err(err_params(format!("Routine '{}' not found", params.name)));
-        }
-        let content = std::fs::read_to_string(&yaml_path)
-            .map_err(|e| err_internal(format!("Read error: {e}")))?;
-        text_ok(content)
-    }
-
-    #[tool(description = "Validate routine YAML without saving. Returns summary or parse errors.")]
-    async fn validate_routine(
-        &self,
-        Parameters(params): Parameters<ValidateRoutineParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        match Routine::from_yaml(&params.yaml_content) {
-            Ok(routine) => {
-                let strict = if routine.strict_mode { "on" } else { "off" };
-                text_ok(format!(
-                    "OK: name={}, {} steps, {} inputs, strict_mode={}",
-                    routine.name,
-                    routine.steps.len(),
-                    routine.inputs.len(),
-                    strict,
-                ))
+        match params.action.as_str() {
+            "schema" => {
+                return text_ok(DSL_SCHEMA.trim().to_string());
             }
-            Err(e) => Err(err_params(format!("Invalid YAML: {e}"))),
+            "get" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' required for get".into()))?;
+                let yaml_path = resolve_routine_path(&name, &routines_dir());
+                if !yaml_path.exists() {
+                    return Err(err_params(format!("Routine '{name}' not found")));
+                }
+                let content = std::fs::read_to_string(&yaml_path)
+                    .map_err(|e| err_internal(format!("Read error: {e}")))?;
+                return text_ok(content);
+            }
+            "create" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' required for create".into()))?;
+                let yaml_content = params
+                    .yaml_content
+                    .ok_or_else(|| err_params("'yaml_content' required for create".into()))?;
+                let _routine = Routine::from_yaml(&yaml_content)
+                    .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
+                let file_path = resolve_routine_path(&name, &routines_dir());
+                if let Some(parent) = file_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| err_internal(format!("Failed to create dir: {e}")))?;
+                }
+                std::fs::write(&file_path, &yaml_content)
+                    .map_err(|e| err_internal(format!("Failed to write file: {e}")))?;
+                return text_ok(format!("created {name} → {}", file_path.display()));
+            }
+            "validate" => {
+                let yaml_content = params
+                    .yaml_content
+                    .ok_or_else(|| err_params("'yaml_content' required for validate".into()))?;
+                return match Routine::from_yaml(&yaml_content) {
+                    Ok(routine) => {
+                        let strict = if routine.strict_mode { "on" } else { "off" };
+                        text_ok(format!(
+                            "OK: name={}, {} steps, {} inputs, strict_mode={}",
+                            routine.name,
+                            routine.steps.len(),
+                            routine.inputs.len(),
+                            strict,
+                        ))
+                    }
+                    Err(e) => Err(err_params(format!("Invalid YAML: {e}"))),
+                };
+            }
+            "dry_run" => {
+                // fall through to dry_run logic below
+            }
+            other => {
+                return Err(err_params(format!(
+                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run"
+                )));
+            }
         }
-    }
 
-    #[tool(
-        description = "Dry-run: resolve all templates with sample inputs and show resolved commands without executing"
-    )]
-    async fn dry_run_routine(
-        &self,
-        Parameters(params): Parameters<DryRunRoutineParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let routine = Routine::from_yaml(&params.yaml_content)
+        // --- dry_run logic ---
+        let yaml_content = params
+            .yaml_content
+            .ok_or_else(|| err_params("'yaml_content' required for dry_run".into()))?;
+        let inputs = params.inputs.unwrap_or_default();
+        let routine = Routine::from_yaml(&yaml_content)
             .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
 
         // Validate required inputs
         for input_def in &routine.inputs {
-            if input_def.required && !params.inputs.contains_key(&input_def.name) {
+            if input_def.required && !inputs.contains_key(&input_def.name) {
                 return Err(err_params(format!(
                     "Missing required input: {}",
                     input_def.name
@@ -463,7 +430,7 @@ impl RoutinesMcpServer {
         // Build resolved inputs with defaults
         let mut resolved_inputs = HashMap::new();
         for input_def in &routine.inputs {
-            if let Some(value) = params.inputs.get(&input_def.name) {
+            if let Some(value) = inputs.get(&input_def.name) {
                 resolved_inputs.insert(input_def.name.clone(), value.clone());
             } else if let Some(default) = &input_def.default {
                 resolved_inputs.insert(input_def.name.clone(), default.clone());
@@ -750,8 +717,8 @@ impl RoutinesMcpServer {
         text_ok(out.trim().to_string())
     }
 
-    #[tool(description = "Execute a routine by name with the given input parameters")]
-    async fn run_routine(
+    #[tool(description = "Run a routine by name")]
+    async fn run(
         &self,
         Parameters(params): Parameters<RunRoutineParams>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -860,338 +827,6 @@ impl RoutinesMcpServer {
         text_ok(out.trim().to_string())
     }
 
-    #[tool(description = "Create a new routine from YAML. Validates the YAML before saving.")]
-    async fn create_routine(
-        &self,
-        Parameters(params): Parameters<CreateRoutineParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let _routine = Routine::from_yaml(&params.yaml_content)
-            .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
-
-        let file_path = resolve_routine_path(&params.name, &routines_dir());
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| err_internal(format!("Failed to create dir: {e}")))?;
-        }
-        std::fs::write(&file_path, &params.yaml_content)
-            .map_err(|e| err_internal(format!("Failed to write file: {e}")))?;
-
-        text_ok(format!("created {} → {}", params.name, file_path.display()))
-    }
-
-    #[tool(
-        description = "Get the complete audit log for a routine run, including all step details"
-    )]
-    async fn get_run_log(
-        &self,
-        Parameters(params): Parameters<GetRunLogParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let db = AuditDb::open(&routines_dir().join("data.db"))
-            .map_err(|e| err_internal(format!("DB error: {e}")))?;
-
-        let log = db
-            .get_run_log(&params.run_id)
-            .map_err(|e| err_internal(format!("Query error: {e}")))?;
-
-        let Some(log) = log else {
-            return Err(err_params(format!("Run '{}' not found", params.run_id)));
-        };
-
-        // Same format as CLI `routines log`
-        let mut out = String::new();
-        let _ = writeln!(out, "Routine: {}", log.routine_name);
-        let _ = writeln!(out, "Run ID:  {}", log.run_id);
-        let _ = writeln!(out, "Status:  {}", log.status);
-        let _ = writeln!(out, "Started: {}", log.started_at);
-        if let Some(ended) = &log.ended_at {
-            let _ = writeln!(out, "Ended:   {ended}");
-        }
-        if let Some(inputs) = &log.input_vars
-            && inputs != "{}"
-        {
-            let _ = writeln!(out, "Inputs:  {inputs}");
-        }
-        let _ = writeln!(out, "{}", "-".repeat(50));
-
-        for (i, step) in log.steps.iter().enumerate() {
-            let icon = if step.status == "SUCCESS" {
-                "OK"
-            } else {
-                "FAIL"
-            };
-            let _ = writeln!(
-                out,
-                "[{icon}] Step {}: {} exit={} {}ms",
-                i + 1,
-                step.step_id,
-                step.exit_code.unwrap_or(-1),
-                step.execution_time_ms,
-            );
-            if let Some(stdout) = &step.stdout {
-                let trimmed = stdout.trim();
-                if !trimmed.is_empty() {
-                    let _ = writeln!(out, "  stdout: {trimmed}");
-                }
-            }
-            if let Some(stderr) = &step.stderr {
-                let trimmed = stderr.trim();
-                if !trimmed.is_empty() {
-                    let _ = writeln!(out, "  stderr: {trimmed}");
-                }
-            }
-        }
-
-        if let Some(output) = &log.output {
-            let trimmed = output.trim();
-            if !trimmed.is_empty() {
-                let _ = writeln!(out, "---\nOutput:\n{trimmed}");
-            }
-        }
-
-        text_ok(out.trim().to_string())
-    }
-
-    #[tool(
-        description = "Manage MCP server configurations. Actions: list (show all), add (register server), remove (delete server), get (show details + test connection)"
-    )]
-    async fn manage_mcp_servers(
-        &self,
-        Parameters(params): Parameters<ManageMcpServersParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let rdir = routines_dir();
-
-        match params.action.as_str() {
-            "list" => {
-                let config = McpConfig::load(&rdir)
-                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
-                if config.servers.is_empty() {
-                    return text_ok("No MCP servers configured".to_string());
-                }
-                let mut out = String::new();
-                for (name, srv) in &config.servers {
-                    let args = if srv.args.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" {}", srv.args.join(" "))
-                    };
-                    let env_count = if srv.env.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({} env vars)", srv.env.len())
-                    };
-                    let _ = writeln!(out, "{name}: {}{args}{env_count}", srv.command);
-                }
-                text_ok(out.trim().to_string())
-            }
-            "add" => {
-                let name = params
-                    .name
-                    .ok_or_else(|| err_params("'name' is required for add".into()))?;
-                let command = params
-                    .command
-                    .ok_or_else(|| err_params("'command' is required for add".into()))?;
-                let mut config = McpConfig::load(&rdir)
-                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
-                config.add(
-                    name.clone(),
-                    McpServerConfig {
-                        command,
-                        args: params.args.unwrap_or_default(),
-                        env: params.env.unwrap_or_default(),
-                    },
-                );
-                config
-                    .save(&rdir)
-                    .map_err(|e| err_internal(format!("Save error: {e}")))?;
-                text_ok(format!("Added MCP server '{name}'"))
-            }
-            "remove" => {
-                let name = params
-                    .name
-                    .ok_or_else(|| err_params("'name' is required for remove".into()))?;
-                let mut config = McpConfig::load(&rdir)
-                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
-                if !config.remove(&name) {
-                    return Err(err_params(format!("MCP server '{name}' not found")));
-                }
-                config
-                    .save(&rdir)
-                    .map_err(|e| err_internal(format!("Save error: {e}")))?;
-                text_ok(format!("Removed MCP server '{name}'"))
-            }
-            "get" => {
-                let name = params
-                    .name
-                    .ok_or_else(|| err_params("'name' is required for get".into()))?;
-                let config = McpConfig::load(&rdir)
-                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
-                let srv = config
-                    .get(&name)
-                    .ok_or_else(|| err_params(format!("MCP server '{name}' not found")))?;
-
-                let mut out = String::new();
-                let _ = writeln!(out, "Name: {name}");
-                let _ = writeln!(out, "Command: {}", srv.command);
-                if !srv.args.is_empty() {
-                    let _ = writeln!(out, "Args: {}", srv.args.join(" "));
-                }
-                if !srv.env.is_empty() {
-                    let env_keys: Vec<&String> = srv.env.keys().collect();
-                    let _ = writeln!(out, "Env: {} (values hidden)", env_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
-                }
-
-                // Test connection
-                let _ = writeln!(out, "---");
-                let secrets = secrets::load_secrets(&rdir.join(".env"));
-                let resolved_env = McpConfig::resolve_env(srv, &secrets);
-                let command = srv.command.clone();
-                let args = srv.args.clone();
-
-                match test_mcp_connection(&command, &args, &resolved_env).await {
-                    Ok(tools) => {
-                        let _ = writeln!(out, "Connection: OK");
-                        let _ = writeln!(out, "Tools ({}):", tools.len());
-                        for t in &tools {
-                            let desc = t.description.as_deref().unwrap_or("");
-                            let _ = writeln!(out, "  {} — {desc}", t.name);
-                        }
-                    }
-                    Err(e) => {
-                        let _ = writeln!(out, "Connection: FAILED — {e}");
-                    }
-                }
-
-                text_ok(out.trim().to_string())
-            }
-            other => Err(err_params(format!(
-                "Unknown action '{other}'. Use: list, add, remove, get"
-            ))),
-        }
-    }
-
-    #[tool(
-        description = "Manage routine registries (remote sources). Actions: list, add (name+url), remove (name), sync (name or all)"
-    )]
-    async fn manage_registries(
-        &self,
-        Parameters(params): Parameters<ManageRegistriesParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let rdir = routines_dir();
-
-        match params.action.as_str() {
-            "list" => {
-                let config = Registries::load(&rdir)
-                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
-                if config.registries.is_empty() {
-                    return text_ok("No registries configured".to_string());
-                }
-                let mut out = String::new();
-                for (name, reg) in &config.registries {
-                    let synced = if rdir.join("registries").join(name).join(".git").exists() {
-                        "synced"
-                    } else {
-                        "not synced"
-                    };
-                    let _ = writeln!(out, "@{name}: {} ({}) [{synced}]", reg.url, reg.git_ref);
-                }
-                text_ok(out.trim().to_string())
-            }
-            "add" => {
-                let name = params
-                    .name
-                    .ok_or_else(|| err_params("'name' is required for add".into()))?;
-                let url = params
-                    .url
-                    .ok_or_else(|| err_params("'url' is required for add".into()))?;
-                let git_ref = params.git_ref.unwrap_or_else(|| "main".to_string());
-                let mut config = Registries::load(&rdir)
-                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
-                config.add(name.clone(), RegistryConfig { url, git_ref });
-                config
-                    .save(&rdir)
-                    .map_err(|e| err_internal(format!("Save error: {e}")))?;
-                text_ok(format!("Added registry '@{name}'. Use sync to fetch."))
-            }
-            "remove" => {
-                let name = params
-                    .name
-                    .ok_or_else(|| err_params("'name' is required for remove".into()))?;
-                let mut config = Registries::load(&rdir)
-                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
-                if !config.remove(&name) {
-                    return Err(err_params(format!("Registry '{name}' not found")));
-                }
-                config
-                    .save(&rdir)
-                    .map_err(|e| err_internal(format!("Save error: {e}")))?;
-                registry::remove_registry_files(&name, &rdir)
-                    .map_err(|e| err_internal(format!("Cleanup error: {e}")))?;
-                text_ok(format!("Removed registry '@{name}'"))
-            }
-            "sync" => {
-                if let Some(name) = params.name {
-                    let config = Registries::load(&rdir)
-                        .map_err(|e| err_internal(format!("Config error: {e}")))?;
-                    let reg = config
-                        .get(&name)
-                        .ok_or_else(|| err_params(format!("Registry '{name}' not found")))?;
-                    let msg = registry::sync_registry(&name, reg, &rdir)
-                        .map_err(|e| err_internal(format!("Sync error: {e}")))?;
-                    text_ok(msg)
-                } else {
-                    let results = registry::sync_all(&rdir)
-                        .map_err(|e| err_internal(format!("Sync error: {e}")))?;
-                    if results.is_empty() {
-                        text_ok("No registries to sync".to_string())
-                    } else {
-                        text_ok(results.join("\n"))
-                    }
-                }
-            }
-            other => Err(err_params(format!(
-                "Unknown action '{other}'. Use: list, add, remove, sync"
-            ))),
-        }
-    }
-}
-
-/// Test connection to an MCP server: spawn → initialize → list_tools → close.
-async fn test_mcp_connection(
-    command: &str,
-    args: &[String],
-    env: &HashMap<String, String>,
-) -> std::result::Result<Vec<rmcp::model::Tool>, String> {
-    use rmcp::ServiceExt;
-    use rmcp::transport::TokioChildProcess;
-    use tokio::process::Command;
-
-    let mut cmd = Command::new(command);
-    cmd.args(args);
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-
-    let transport = TokioChildProcess::new(cmd)
-        .map_err(|e| format!("Failed to spawn: {e}"))?;
-
-    let client = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        ().serve(transport),
-    )
-    .await
-    .map_err(|_| "Initialization timed out (30s)".to_string())?
-    .map_err(|e| format!("Initialization failed: {e}"))?;
-
-    let tools = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        client.list_all_tools(),
-    )
-    .await
-    .map_err(|_| "list_tools timed out (10s)".to_string())?
-    .map_err(|e| format!("list_tools failed: {e}"))?;
-
-    let _ = client.cancel().await;
-    Ok(tools)
 }
 
 #[tool_handler]
@@ -1201,13 +836,8 @@ impl ServerHandler for RoutinesMcpServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("routines", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Routines: deterministic workflow engine for AI agents. \
-             get_dsl_schema → DSL reference, list_routines → discover, \
-             get_routine → read source, validate_routine → check YAML, \
-             dry_run_routine → preview commands, run_routine → execute, \
-             create_routine → save, get_run_log → inspect, \
-             manage_mcp_servers → configure MCP servers (list/add/remove/get), \
-             manage_registries → remote routine sources (list/add/remove/sync)."
+            "Routines: workflow engine. list_routines → discover, \
+             run_routine → execute, manage_routine → schema/get/create/validate/dry_run."
                 .into(),
         );
         info
