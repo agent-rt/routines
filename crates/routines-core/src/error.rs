@@ -26,6 +26,12 @@ pub enum RoutineError {
     #[error("Dangerous command blocked in strict_mode: '{command}' in step '{step_id}'")]
     DangerousCommand { step_id: String, command: String },
 
+    #[error("Invalid step dependency in '{step_id}': {reason}")]
+    InvalidNeeds { step_id: String, reason: String },
+
+    #[error("Cyclic dependency detected in step graph")]
+    CyclicDependency,
+
     #[error("MCP config error: {0}")]
     McpConfig(String),
 

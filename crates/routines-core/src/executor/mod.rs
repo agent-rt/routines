@@ -3,12 +3,13 @@ mod http;
 mod mcp;
 mod routine;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Condvar};
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
-use crate::parser::{OnFail, Routine, StepAction};
+use crate::parser::{OnFail, Routine, Step, StepAction};
 
 /// Result of executing a single step.
 #[derive(Debug, Clone)]
@@ -133,102 +134,120 @@ pub(crate) fn run_routine_with_depth(
         }
     }
 
-    let mut ctx = Context::new(resolved_inputs, secrets.clone());
+    let ctx = Context::new(resolved_inputs, secrets.clone());
+
+    if routine.has_dag() {
+        run_dag(routine, ctx, secrets, routines_dir, depth)
+    } else {
+        run_sequential(routine, ctx, secrets, routines_dir, depth)
+    }
+}
+
+/// Execute a single step against the given context.
+fn execute_step(
+    step: &Step,
+    routine: &Routine,
+    ctx: &Context,
+    secrets: &HashMap<String, String>,
+    routines_dir: &PathBuf,
+    depth: u32,
+) -> Result<StepResult> {
+    // Evaluate `when` condition
+    if let Some(when_expr) = &step.when {
+        let resolved = ctx.resolve(when_expr, &step.id)?;
+        if !evaluate_condition(&resolved) {
+            return Ok(StepResult {
+                step_id: step.id.clone(),
+                status: StepStatus::Skipped,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                execution_time_ms: 0,
+            });
+        }
+    }
+
+    match &step.action {
+        StepAction::Cli {
+            command,
+            args,
+            env,
+            stdin,
+            working_dir,
+        } => cli::execute(
+            &cli::CliParams {
+                step_id: &step.id,
+                command,
+                args,
+                env,
+                stdin_template: stdin.as_deref(),
+                working_dir_template: working_dir.as_deref(),
+                timeout: step.timeout,
+                strict_mode: routine.strict_mode,
+            },
+            ctx,
+        ),
+        StepAction::Http {
+            url,
+            method,
+            headers,
+            body,
+        } => http::execute(
+            &step.id,
+            url,
+            method,
+            headers,
+            body.as_deref(),
+            step.timeout,
+            ctx,
+        ),
+        StepAction::Routine {
+            name,
+            inputs: input_templates,
+        } => routine::execute(
+            &routine::RoutineParams {
+                step_id: &step.id,
+                name,
+                input_templates,
+                timeout: step.timeout,
+                depth,
+                secrets,
+                routines_dir,
+            },
+            ctx,
+        ),
+        StepAction::Mcp {
+            server,
+            tool,
+            arguments,
+        } => mcp::execute(
+            &mcp::McpParams {
+                step_id: &step.id,
+                server,
+                tool,
+                arguments,
+                timeout: step.timeout,
+                routines_dir,
+                secrets,
+            },
+            ctx,
+        ),
+    }
+}
+
+/// Sequential execution path (no `needs` declared — original behavior).
+fn run_sequential(
+    routine: &Routine,
+    mut ctx: Context,
+    secrets: HashMap<String, String>,
+    routines_dir: PathBuf,
+    depth: u32,
+) -> Result<RunResult> {
     let mut step_results = Vec::new();
     let mut has_failure = false;
 
     for step in &routine.steps {
-        // Evaluate `when` condition
-        if let Some(when_expr) = &step.when {
-            let resolved = ctx.resolve(when_expr, &step.id)?;
-            if !evaluate_condition(&resolved) {
-                let result = StepResult {
-                    step_id: step.id.clone(),
-                    status: StepStatus::Skipped,
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    execution_time_ms: 0,
-                };
-                ctx.add_step_output(
-                    step.id.clone(),
-                    StepOutput {
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: None,
-                    },
-                );
-                step_results.push(result);
-                continue;
-            }
-        }
-
-        let result = match &step.action {
-            StepAction::Cli {
-                command,
-                args,
-                env,
-                stdin,
-                working_dir,
-            } => cli::execute(
-                &cli::CliParams {
-                    step_id: &step.id,
-                    command,
-                    args,
-                    env,
-                    stdin_template: stdin.as_deref(),
-                    working_dir_template: working_dir.as_deref(),
-                    timeout: step.timeout,
-                    strict_mode: routine.strict_mode,
-                },
-                &ctx,
-            )?,
-            StepAction::Http {
-                url,
-                method,
-                headers,
-                body,
-            } => http::execute(
-                &step.id,
-                url,
-                method,
-                headers,
-                body.as_deref(),
-                step.timeout,
-                &ctx,
-            )?,
-            StepAction::Routine {
-                name,
-                inputs: input_templates,
-            } => routine::execute(
-                &routine::RoutineParams {
-                    step_id: &step.id,
-                    name,
-                    input_templates,
-                    timeout: step.timeout,
-                    depth,
-                    secrets: &secrets,
-                    routines_dir: &routines_dir,
-                },
-                &ctx,
-            )?,
-            StepAction::Mcp {
-                server,
-                tool,
-                arguments,
-            } => mcp::execute(
-                &mcp::McpParams {
-                    step_id: &step.id,
-                    server,
-                    tool,
-                    arguments,
-                    timeout: step.timeout,
-                    routines_dir: &routines_dir,
-                    secrets: &secrets,
-                },
-                &ctx,
-            )?,
-        };
+        let result = execute_step(step, routine, &ctx, &secrets, &routines_dir, depth)?;
 
         let status = result.status.clone();
         ctx.add_step_output(
@@ -255,6 +274,211 @@ pub(crate) fn run_routine_with_depth(
 
     Ok(RunResult {
         status: if has_failure {
+            RunStatus::Failed
+        } else {
+            RunStatus::Success
+        },
+        step_results,
+    })
+}
+
+/// DAG-based parallel execution (at least one step has `needs`).
+fn run_dag(
+    routine: &Routine,
+    ctx: Context,
+    secrets: HashMap<String, String>,
+    routines_dir: PathBuf,
+    depth: u32,
+) -> Result<RunResult> {
+    let step_map: HashMap<&str, &Step> = routine.steps.iter().map(|s| (s.id.as_str(), s)).collect();
+
+    // Build in-degree and downstream adjacency
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    let mut downstream: HashMap<&str, Vec<&str>> = HashMap::new();
+    for step in &routine.steps {
+        in_degree.entry(step.id.as_str()).or_insert(0);
+        downstream.entry(step.id.as_str()).or_default();
+        for dep in &step.needs {
+            downstream.entry(dep.as_str()).or_default().push(&step.id);
+            *in_degree.entry(step.id.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    // Shared state for DAG scheduling
+    let ctx = Arc::new(Mutex::new(ctx));
+    let completed: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let results: Arc<Mutex<HashMap<String, StepResult>>> = Arc::new(Mutex::new(HashMap::new()));
+    let in_degree = Arc::new(Mutex::new(in_degree));
+    let aborted = Arc::new(Mutex::new(false));
+    let notify = Arc::new(Condvar::new());
+
+    // Find initially ready steps (in_degree == 0)
+    let mut ready: VecDeque<String> = {
+        let deg = in_degree.lock().unwrap();
+        deg.iter()
+            .filter(|&(_, &d)| d == 0)
+            .map(|(&id, _)| id.to_string())
+            .collect()
+    };
+
+    std::thread::scope(|scope| {
+        let mut handles: Vec<std::thread::ScopedJoinHandle<'_, ()>> = Vec::new();
+
+        loop {
+            // Check if all steps are done
+            {
+                let comp = completed.lock().unwrap();
+                if comp.len() == routine.steps.len() {
+                    break;
+                }
+            }
+
+            // Check abort
+            if *aborted.lock().unwrap() {
+                // Wait for running threads to finish
+                break;
+            }
+
+            // Launch all ready steps
+            while let Some(step_id) = ready.pop_front() {
+                if *aborted.lock().unwrap() {
+                    // Mark remaining ready as skipped
+                    let mut res = results.lock().unwrap();
+                    let mut comp = completed.lock().unwrap();
+                    res.insert(
+                        step_id.clone(),
+                        StepResult {
+                            step_id: step_id.clone(),
+                            status: StepStatus::Skipped,
+                            exit_code: None,
+                            stdout: String::new(),
+                            stderr: "Skipped due to upstream failure".to_string(),
+                            execution_time_ms: 0,
+                        },
+                    );
+                    comp.insert(step_id);
+                    continue;
+                }
+
+                let step = *step_map.get(step_id.as_str()).unwrap();
+                let ctx = Arc::clone(&ctx);
+                let completed = Arc::clone(&completed);
+                let results_ref = Arc::clone(&results);
+                let aborted = Arc::clone(&aborted);
+                let notify = Arc::clone(&notify);
+                let secrets = secrets.clone();
+                let routines_dir = routines_dir.clone();
+
+                handles.push(scope.spawn(move || {
+                    let ctx_snapshot = ctx.lock().unwrap().clone();
+                    let result = execute_step(
+                        step, routine, &ctx_snapshot, &secrets, &routines_dir, depth,
+                    );
+
+                    let step_result = match result {
+                        Ok(r) => r,
+                        Err(e) => StepResult {
+                            step_id: step.id.clone(),
+                            status: StepStatus::Failed,
+                            exit_code: Some(1),
+                            stdout: String::new(),
+                            stderr: e.to_string(),
+                            execution_time_ms: 0,
+                        },
+                    };
+
+                    // Write output to context
+                    {
+                        let mut ctx = ctx.lock().unwrap();
+                        ctx.add_step_output(
+                            step.id.clone(),
+                            StepOutput {
+                                stdout: step_result.stdout.trim().to_string(),
+                                stderr: step_result.stderr.trim().to_string(),
+                                exit_code: step_result.exit_code,
+                            },
+                        );
+                    }
+
+                    // Check failure
+                    if step_result.status == StepStatus::Failed
+                        && step.on_fail != OnFail::Continue
+                    {
+                        *aborted.lock().unwrap() = true;
+                    }
+
+                    results_ref.lock().unwrap().insert(step.id.clone(), step_result);
+                    completed.lock().unwrap().insert(step.id.clone());
+                    notify.notify_all();
+                }));
+            }
+
+            // Wait for any step to complete, then check for newly ready steps
+            {
+                let mut comp = completed.lock().unwrap();
+                let prev_count = comp.len();
+                while comp.len() == prev_count && comp.len() < routine.steps.len() {
+                    comp = notify.wait(comp).unwrap();
+                }
+            }
+
+            // Find newly ready steps
+            {
+                let deg = &mut in_degree.lock().unwrap();
+                let comp = completed.lock().unwrap();
+                for step in &routine.steps {
+                    if comp.contains(&step.id) {
+                        // Update downstream in-degrees
+                        if let Some(ds) = downstream.get(step.id.as_str()) {
+                            for &d in ds {
+                                if let Some(count) = deg.get_mut(d)
+                                    && *count > 0
+                                {
+                                    *count -= 1;
+                                    if *count == 0 && !comp.contains(d) && !ready.iter().any(|r| r == d) {
+                                        ready.push_back(d.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Wait for all spawned threads
+        for h in handles {
+            let _ = h.join();
+        }
+    });
+
+    // Collect results in step order
+    let results_map = results.lock().unwrap();
+    let mut step_results = Vec::new();
+    let mut has_failure = false;
+    let was_aborted = *aborted.lock().unwrap();
+
+    for step in &routine.steps {
+        if let Some(result) = results_map.get(&step.id) {
+            if result.status == StepStatus::Failed {
+                has_failure = true;
+            }
+            step_results.push(result.clone());
+        } else {
+            // Step never ran (aborted before reaching it)
+            step_results.push(StepResult {
+                step_id: step.id.clone(),
+                status: StepStatus::Skipped,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: "Skipped due to upstream failure".to_string(),
+                execution_time_ms: 0,
+            });
+        }
+    }
+
+    Ok(RunResult {
+        status: if has_failure || was_aborted {
             RunStatus::Failed
         } else {
             RunStatus::Success
@@ -576,5 +800,143 @@ steps:
         assert!(result.step_results[0].stderr.contains("depth"));
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn parallel_steps_execute_concurrently() {
+        // Two independent steps that each sleep 100ms should complete in ~100ms total (not 200ms)
+        let routine = Routine::from_yaml(
+            r#"
+name: parallel_test
+description: test parallel execution
+steps:
+  - id: a
+    type: cli
+    command: /bin/sh
+    args: ["-c", "sleep 0.1 && echo a_done"]
+    needs: []
+  - id: b
+    type: cli
+    command: /bin/sh
+    args: ["-c", "sleep 0.1 && echo b_done"]
+    needs: []
+  - id: c
+    type: cli
+    command: echo
+    args: ["{{ a.stdout }} {{ b.stdout }}"]
+    needs: [a, b]
+"#,
+        )
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        let elapsed = start.elapsed().as_millis();
+
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results.len(), 3);
+        assert_eq!(result.step_results[0].status, StepStatus::Success);
+        assert_eq!(result.step_results[1].status, StepStatus::Success);
+        assert_eq!(result.step_results[2].status, StepStatus::Success);
+        // c should see outputs from a and b
+        assert!(result.step_results[2].stdout.contains("a_done"));
+        assert!(result.step_results[2].stdout.contains("b_done"));
+        // Should complete in ~100ms, not 200ms (allow some margin)
+        assert!(elapsed < 300, "Expected <300ms but took {elapsed}ms");
+    }
+
+    #[test]
+    fn dag_on_fail_stop_cancels_downstream() {
+        let routine = Routine::from_yaml(
+            r#"
+name: dag_fail
+description: test
+steps:
+  - id: a
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+    needs: []
+  - id: b
+    type: cli
+    command: echo
+    args: ["should not run"]
+    needs: [a]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.step_results[0].status, StepStatus::Failed);
+        assert_eq!(result.step_results[1].status, StepStatus::Skipped);
+    }
+
+    #[test]
+    fn dag_on_fail_continue_runs_downstream() {
+        let routine = Routine::from_yaml(
+            r#"
+name: dag_continue
+description: test
+steps:
+  - id: a
+    type: cli
+    command: /bin/sh
+    args: ["-c", "exit 1"]
+    on_fail: continue
+    needs: []
+  - id: b
+    type: cli
+    command: echo
+    args: ["ran after failure"]
+    needs: [a]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Failed);
+        assert_eq!(result.step_results[0].status, StepStatus::Failed);
+        assert_eq!(result.step_results[1].status, StepStatus::Success);
+        assert!(result.step_results[1].stdout.contains("ran after failure"));
+    }
+
+    #[test]
+    fn dag_diamond_dependency() {
+        // Diamond: a → b, a → c, b+c → d
+        let routine = Routine::from_yaml(
+            r#"
+name: diamond
+description: test
+steps:
+  - id: a
+    type: cli
+    command: echo
+    args: ["start"]
+    needs: []
+  - id: b
+    type: cli
+    command: echo
+    args: ["b={{ a.stdout }}"]
+    needs: [a]
+  - id: c
+    type: cli
+    command: echo
+    args: ["c={{ a.stdout }}"]
+    needs: [a]
+  - id: d
+    type: cli
+    command: echo
+    args: ["{{ b.stdout }},{{ c.stdout }}"]
+    needs: [b, c]
+"#,
+        )
+        .unwrap();
+
+        let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results.len(), 4);
+        assert!(result.step_results[3].stdout.contains("b=start"));
+        assert!(result.step_results[3].stdout.contains("c=start"));
     }
 }

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::error::{Result, RoutineError};
 
 /// Holds all resolved values available for template substitution.
+#[derive(Clone)]
 pub struct Context {
     inputs: HashMap<String, String>,
     secrets: HashMap<String, String>,

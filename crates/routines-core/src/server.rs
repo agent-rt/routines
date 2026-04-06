@@ -124,6 +124,7 @@ Step (common fields):
   timeout: integer (optional) — seconds before step is killed
   when: String (optional) — condition; step skipped if false. Supports: A == B, A != B, truthy
   on_fail: stop|continue (default: stop) — error strategy; continue allows subsequent steps to run
+  needs: list of String (default: []) — step IDs that must complete first. Enables parallel execution.
 
 Step (type: cli):
   command: String (required) — executable name or path
@@ -474,6 +475,14 @@ impl RoutinesMcpServer {
             if let Some(timeout) = step.timeout {
                 let _ = writeln!(out, "    timeout: {timeout}s");
             }
+            if !step.needs.is_empty() {
+                let _ = writeln!(out, "    needs: [{}]", step.needs.join(", "));
+            }
+        }
+
+        // Show execution mode
+        if routine.has_dag() {
+            let _ = writeln!(out, "\nMode: parallel (DAG)");
         }
 
         text_ok(out.trim().to_string())

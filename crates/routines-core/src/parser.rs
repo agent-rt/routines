@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +42,9 @@ pub struct Step {
     /// Error strategy when step fails.
     #[serde(default)]
     pub on_fail: OnFail,
+    /// Step IDs that must complete before this step starts. Enables parallel execution.
+    #[serde(default)]
+    pub needs: Vec<String>,
 }
 
 /// Type-discriminated step action. Determines which fields are required.
@@ -98,6 +101,7 @@ impl Routine {
     /// Parse a Routine from a YAML string.
     pub fn from_yaml(yaml: &str) -> crate::error::Result<Self> {
         let routine: Routine = serde_yaml::from_str(yaml)?;
+        routine.validate_dag()?;
         Ok(routine)
     }
 
@@ -105,6 +109,71 @@ impl Routine {
     pub fn from_file(path: &std::path::Path) -> crate::error::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Self::from_yaml(&content)
+    }
+
+    /// Returns true if any step declares `needs`, enabling DAG parallel mode.
+    pub fn has_dag(&self) -> bool {
+        self.steps.iter().any(|s| !s.needs.is_empty())
+    }
+
+    /// Validate the step dependency graph: no self-refs, all refs exist, no cycles.
+    fn validate_dag(&self) -> crate::error::Result<()> {
+        let step_ids: HashSet<&str> = self.steps.iter().map(|s| s.id.as_str()).collect();
+
+        for step in &self.steps {
+            for dep in &step.needs {
+                if dep == &step.id {
+                    return Err(crate::error::RoutineError::InvalidNeeds {
+                        step_id: step.id.clone(),
+                        reason: "step cannot depend on itself".to_string(),
+                    });
+                }
+                if !step_ids.contains(dep.as_str()) {
+                    return Err(crate::error::RoutineError::InvalidNeeds {
+                        step_id: step.id.clone(),
+                        reason: format!("depends on unknown step '{dep}'"),
+                    });
+                }
+            }
+        }
+
+        // Topological sort to detect cycles (Kahn's algorithm)
+        if self.has_dag() {
+            let mut in_degree: HashMap<&str, usize> = HashMap::new();
+            let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+            for step in &self.steps {
+                in_degree.entry(step.id.as_str()).or_insert(0);
+                adj.entry(step.id.as_str()).or_default();
+                for dep in &step.needs {
+                    adj.entry(dep.as_str()).or_default().push(&step.id);
+                    *in_degree.entry(step.id.as_str()).or_insert(0) += 1;
+                }
+            }
+
+            let mut queue: VecDeque<&str> = in_degree
+                .iter()
+                .filter(|&(_, &deg)| deg == 0)
+                .map(|(&id, _)| id)
+                .collect();
+            let mut visited = 0usize;
+
+            while let Some(node) = queue.pop_front() {
+                visited += 1;
+                for &downstream in adj.get(node).unwrap_or(&vec![]) {
+                    let deg = in_degree.get_mut(downstream).unwrap();
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(downstream);
+                    }
+                }
+            }
+
+            if visited != self.steps.len() {
+                return Err(crate::error::RoutineError::CyclicDependency);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -239,6 +308,113 @@ steps:
 "#,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_needs_field() {
+        let routine = Routine::from_yaml(
+            r#"
+name: parallel
+description: test
+steps:
+  - id: a
+    type: cli
+    command: echo
+    args: ["a"]
+  - id: b
+    type: cli
+    command: echo
+    args: ["b"]
+  - id: c
+    type: cli
+    command: echo
+    args: ["c"]
+    needs: [a, b]
+"#,
+        )
+        .unwrap();
+
+        assert!(routine.has_dag());
+        assert!(routine.steps[0].needs.is_empty());
+        assert!(routine.steps[1].needs.is_empty());
+        assert_eq!(routine.steps[2].needs, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn no_needs_is_sequential() {
+        let routine = Routine::from_yaml(
+            r#"
+name: seq
+description: test
+steps:
+  - id: a
+    type: cli
+    command: echo
+    args: ["a"]
+  - id: b
+    type: cli
+    command: echo
+    args: ["b"]
+"#,
+        )
+        .unwrap();
+
+        assert!(!routine.has_dag());
+    }
+
+    #[test]
+    fn needs_self_reference_fails() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad
+description: test
+steps:
+  - id: loop
+    type: cli
+    command: echo
+    needs: [loop]
+"#,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("itself"));
+    }
+
+    #[test]
+    fn needs_unknown_step_fails() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad
+description: test
+steps:
+  - id: a
+    type: cli
+    command: echo
+    needs: [nonexistent]
+"#,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown step"));
+    }
+
+    #[test]
+    fn cyclic_dependency_fails() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad
+description: test
+steps:
+  - id: a
+    type: cli
+    command: echo
+    needs: [b]
+  - id: b
+    type: cli
+    command: echo
+    needs: [a]
+"#,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cyclic"));
     }
 
     #[test]
