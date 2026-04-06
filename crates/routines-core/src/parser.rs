@@ -73,6 +73,12 @@ pub enum StepAction {
         #[serde(default)]
         inputs: HashMap<String, String>,
     },
+    Mcp {
+        server: String,
+        tool: String,
+        #[serde(default)]
+        arguments: HashMap<String, serde_json::Value>,
+    },
 }
 
 fn default_method() -> String {
@@ -181,6 +187,55 @@ description: test
 steps:
   - id: no_cmd
     type: cli
+"#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_mcp_step() {
+        let routine = Routine::from_yaml(
+            r#"
+name: mcp_test
+description: test
+steps:
+  - id: notify
+    type: mcp
+    server: slack
+    tool: send_message
+    arguments:
+      channel: general
+      text: "hello"
+      count: 42
+"#,
+        )
+        .unwrap();
+
+        match &routine.steps[0].action {
+            StepAction::Mcp {
+                server,
+                tool,
+                arguments,
+            } => {
+                assert_eq!(server, "slack");
+                assert_eq!(tool, "send_message");
+                assert_eq!(arguments["channel"], serde_json::json!("general"));
+                assert_eq!(arguments["count"], serde_json::json!(42));
+            }
+            _ => panic!("expected mcp step"),
+        }
+    }
+
+    #[test]
+    fn mcp_without_server_fails() {
+        let result = Routine::from_yaml(
+            r#"
+name: bad
+description: test
+steps:
+  - id: no_srv
+    type: mcp
+    tool: something
 "#,
         );
         assert!(result.is_err());

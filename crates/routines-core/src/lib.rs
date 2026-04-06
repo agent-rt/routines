@@ -2,6 +2,7 @@ pub mod audit;
 pub mod context;
 pub mod error;
 pub mod executor;
+pub mod mcp_config;
 pub mod parser;
 pub mod secrets;
 pub mod server;

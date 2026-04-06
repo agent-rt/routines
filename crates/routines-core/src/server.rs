@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::audit::AuditDb;
 use crate::executor::{self, RunStatus, StepStatus};
+use crate::mcp_config::{McpConfig, McpServerConfig};
 use crate::parser::{Routine, StepAction};
 use crate::secrets;
 
@@ -72,6 +73,25 @@ pub struct ValidateRoutineParams {
     pub yaml_content: String,
 }
 
+/// Parameter struct for manage_mcp_servers
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ManageMcpServersParams {
+    /// Action to perform: "list", "add", "remove", "get"
+    pub action: String,
+    /// Server name (required for add, remove, get)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Command to start the MCP server (required for add)
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Arguments for the command (optional, for add)
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Environment variables (optional, for add). Values support {{ secrets.X }} templates.
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+}
+
 /// Parameter struct for dry_run_routine
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DryRunRoutineParams {
@@ -121,6 +141,11 @@ Step (type: http):
 Step (type: routine):
   name: String (required) — name of routine to invoke from hub
   inputs: map of String→String (default: {}) — input parameters, supports templates
+
+Step (type: mcp):
+  server: String (required) — MCP server name (from ~/.routines/mcp.json)
+  tool: String (required) — tool name to call on the server
+  arguments: map of String→JSON (default: {}) — tool arguments, string values support templates
 
 Template syntax:
   {{ inputs.NAME }}       — input parameter value
@@ -406,6 +431,35 @@ impl RoutinesMcpServer {
                         let _ = writeln!(out, "    inputs: {}", input_parts.join(" "));
                     }
                 }
+                StepAction::Mcp {
+                    server,
+                    tool,
+                    arguments,
+                } => {
+                    let _ = writeln!(
+                        out,
+                        "[{}] {}: mcp {}:{}",
+                        i + 1,
+                        step.id,
+                        server,
+                        tool
+                    );
+                    if !arguments.is_empty() {
+                        let arg_parts: Vec<String> = arguments
+                            .iter()
+                            .map(|(k, v)| {
+                                let display = match v {
+                                    serde_json::Value::String(s) => ctx
+                                        .resolve(s, &step.id)
+                                        .unwrap_or_else(|e| format!("<error: {e}>")),
+                                    other => other.to_string(),
+                                };
+                                format!("{k}={display}")
+                            })
+                            .collect();
+                        let _ = writeln!(out, "    arguments: {}", arg_parts.join(" "));
+                    }
+                }
             }
 
             if let Some(when_expr) = &step.when {
@@ -608,6 +662,163 @@ impl RoutinesMcpServer {
 
         text_ok(out.trim().to_string())
     }
+
+    #[tool(
+        description = "Manage MCP server configurations. Actions: list (show all), add (register server), remove (delete server), get (show details + test connection)"
+    )]
+    async fn manage_mcp_servers(
+        &self,
+        Parameters(params): Parameters<ManageMcpServersParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let rdir = routines_dir();
+
+        match params.action.as_str() {
+            "list" => {
+                let config = McpConfig::load(&rdir)
+                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
+                if config.servers.is_empty() {
+                    return text_ok("No MCP servers configured".to_string());
+                }
+                let mut out = String::new();
+                for (name, srv) in &config.servers {
+                    let args = if srv.args.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", srv.args.join(" "))
+                    };
+                    let env_count = if srv.env.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({} env vars)", srv.env.len())
+                    };
+                    let _ = writeln!(out, "{name}: {}{args}{env_count}", srv.command);
+                }
+                text_ok(out.trim().to_string())
+            }
+            "add" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' is required for add".into()))?;
+                let command = params
+                    .command
+                    .ok_or_else(|| err_params("'command' is required for add".into()))?;
+                let mut config = McpConfig::load(&rdir)
+                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
+                config.add(
+                    name.clone(),
+                    McpServerConfig {
+                        command,
+                        args: params.args.unwrap_or_default(),
+                        env: params.env.unwrap_or_default(),
+                    },
+                );
+                config
+                    .save(&rdir)
+                    .map_err(|e| err_internal(format!("Save error: {e}")))?;
+                text_ok(format!("Added MCP server '{name}'"))
+            }
+            "remove" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' is required for remove".into()))?;
+                let mut config = McpConfig::load(&rdir)
+                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
+                if !config.remove(&name) {
+                    return Err(err_params(format!("MCP server '{name}' not found")));
+                }
+                config
+                    .save(&rdir)
+                    .map_err(|e| err_internal(format!("Save error: {e}")))?;
+                text_ok(format!("Removed MCP server '{name}'"))
+            }
+            "get" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' is required for get".into()))?;
+                let config = McpConfig::load(&rdir)
+                    .map_err(|e| err_internal(format!("Config error: {e}")))?;
+                let srv = config
+                    .get(&name)
+                    .ok_or_else(|| err_params(format!("MCP server '{name}' not found")))?;
+
+                let mut out = String::new();
+                let _ = writeln!(out, "Name: {name}");
+                let _ = writeln!(out, "Command: {}", srv.command);
+                if !srv.args.is_empty() {
+                    let _ = writeln!(out, "Args: {}", srv.args.join(" "));
+                }
+                if !srv.env.is_empty() {
+                    let env_keys: Vec<&String> = srv.env.keys().collect();
+                    let _ = writeln!(out, "Env: {} (values hidden)", env_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
+                }
+
+                // Test connection
+                let _ = writeln!(out, "---");
+                let secrets = secrets::load_secrets(&rdir.join(".env"));
+                let resolved_env = McpConfig::resolve_env(srv, &secrets);
+                let command = srv.command.clone();
+                let args = srv.args.clone();
+
+                match test_mcp_connection(&command, &args, &resolved_env).await {
+                    Ok(tools) => {
+                        let _ = writeln!(out, "Connection: OK");
+                        let _ = writeln!(out, "Tools ({}):", tools.len());
+                        for t in &tools {
+                            let desc = t.description.as_deref().unwrap_or("");
+                            let _ = writeln!(out, "  {} — {desc}", t.name);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = writeln!(out, "Connection: FAILED — {e}");
+                    }
+                }
+
+                text_ok(out.trim().to_string())
+            }
+            other => Err(err_params(format!(
+                "Unknown action '{other}'. Use: list, add, remove, get"
+            ))),
+        }
+    }
+}
+
+/// Test connection to an MCP server: spawn → initialize → list_tools → close.
+async fn test_mcp_connection(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+) -> std::result::Result<Vec<rmcp::model::Tool>, String> {
+    use rmcp::ServiceExt;
+    use rmcp::transport::TokioChildProcess;
+    use tokio::process::Command;
+
+    let mut cmd = Command::new(command);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+
+    let transport = TokioChildProcess::new(cmd)
+        .map_err(|e| format!("Failed to spawn: {e}"))?;
+
+    let client = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ().serve(transport),
+    )
+    .await
+    .map_err(|_| "Initialization timed out (30s)".to_string())?
+    .map_err(|e| format!("Initialization failed: {e}"))?;
+
+    let tools = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.list_all_tools(),
+    )
+    .await
+    .map_err(|_| "list_tools timed out (10s)".to_string())?
+    .map_err(|e| format!("list_tools failed: {e}"))?;
+
+    let _ = client.cancel().await;
+    Ok(tools)
 }
 
 #[tool_handler]
@@ -621,7 +832,8 @@ impl ServerHandler for RoutinesMcpServer {
              get_dsl_schema → DSL reference, list_routines → discover, \
              get_routine → read source, validate_routine → check YAML, \
              dry_run_routine → preview commands, run_routine → execute, \
-             create_routine → save, get_run_log → inspect."
+             create_routine → save, get_run_log → inspect, \
+             manage_mcp_servers → configure MCP servers (list/add/remove/get)."
                 .into(),
         );
         info

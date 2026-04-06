@@ -1,5 +1,6 @@
 mod cli;
 mod http;
+mod mcp;
 mod routine;
 
 use std::collections::HashMap;
@@ -208,6 +209,22 @@ pub(crate) fn run_routine_with_depth(
                     depth,
                     secrets: &secrets,
                     routines_dir: &routines_dir,
+                },
+                &ctx,
+            )?,
+            StepAction::Mcp {
+                server,
+                tool,
+                arguments,
+            } => mcp::execute(
+                &mcp::McpParams {
+                    step_id: &step.id,
+                    server,
+                    tool,
+                    arguments,
+                    timeout: step.timeout,
+                    routines_dir: &routines_dir,
+                    secrets: &secrets,
                 },
                 &ctx,
             )?,
