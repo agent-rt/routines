@@ -18,6 +18,8 @@ pub(super) struct CliParams<'a> {
     pub working_dir_template: Option<&'a str>,
     pub timeout: Option<u64>,
     pub strict_mode: bool,
+    /// Secrets to inject as environment variables (from routine-level secrets_env).
+    pub secrets_env: &'a HashMap<String, String>,
 }
 
 /// Execute a CLI (subprocess) step.
@@ -51,7 +53,8 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
 
     let mut cmd = Command::new(&resolved_command);
     cmd.args(&resolved_args)
-        .envs(&resolved_env)
+        .envs(params.secrets_env)  // secrets_env first (lower priority)
+        .envs(&resolved_env)       // step-level env overrides
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
         } else {

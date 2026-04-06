@@ -21,6 +21,58 @@ pub struct Routine {
     /// Output format hint for CLI rendering.
     #[serde(default)]
     pub output_format: OutputFormat,
+    /// Secrets injection into CLI subprocess environment variables.
+    #[serde(default)]
+    pub secrets_env: SecretsEnv,
+}
+
+/// Secrets injection mode for CLI subprocess environment variables.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub enum SecretsEnv {
+    /// No automatic injection (default, current behavior).
+    #[default]
+    None,
+    /// Inject all secrets as same-name environment variables.
+    Auto,
+    /// Inject only the listed secret names.
+    List(Vec<String>),
+}
+
+impl<'de> serde::Deserialize<'de> for SecretsEnv {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct SecretsEnvVisitor;
+
+        impl<'de> de::Visitor<'de> for SecretsEnvVisitor {
+            type Value = SecretsEnv;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("'none', 'auto', or a list of secret names")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+                match v {
+                    "none" => Ok(SecretsEnv::None),
+                    "auto" => Ok(SecretsEnv::Auto),
+                    _ => Err(E::custom(format!("unknown secrets_env value: '{v}', expected 'none' or 'auto'"))),
+                }
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element::<String>()? {
+                    items.push(item);
+                }
+                Ok(SecretsEnv::List(items))
+            }
+        }
+
+        deserializer.deserialize_any(SecretsEnvVisitor)
+    }
 }
 
 /// Output format for CLI rendering.
@@ -877,5 +929,67 @@ steps:
 
         assert!(routine.output.is_none());
         assert_eq!(routine.output_format, OutputFormat::Plain);
+    }
+
+    #[test]
+    fn parse_secrets_env_auto() {
+        let routine = Routine::from_yaml(
+            r#"
+name: env_test
+description: test
+secrets_env: auto
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.secrets_env, SecretsEnv::Auto);
+    }
+
+    #[test]
+    fn parse_secrets_env_list() {
+        let routine = Routine::from_yaml(
+            r#"
+name: env_test
+description: test
+secrets_env:
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        match &routine.secrets_env {
+            SecretsEnv::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], "AWS_ACCESS_KEY_ID");
+                assert_eq!(items[1], "AWS_SECRET_ACCESS_KEY");
+            }
+            other => panic!("expected SecretsEnv::List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_secrets_env_is_none() {
+        let routine = Routine::from_yaml(
+            r#"
+name: no_env
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(routine.secrets_env, SecretsEnv::None);
     }
 }

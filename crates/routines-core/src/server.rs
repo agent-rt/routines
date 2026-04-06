@@ -127,6 +127,9 @@ Top-level fields:
   name: String (required)
   description: String (required)
   strict_mode: bool (default: false) — blocks dangerous commands (rm -rf, mkfs, etc.)
+  secrets_env: none|auto|list (default: none) — inject secrets as CLI subprocess env vars
+    none: no injection (default). auto: all secrets as same-name env vars. list: only named secrets.
+    Step-level env: overrides secrets_env for same key.
   inputs: list of InputDef (default: [])
   steps: list of Step (required)
   finally: list of Step (default: []) — cleanup steps, always run after main steps regardless of success/failure
@@ -679,6 +682,17 @@ impl RoutinesMcpServer {
         // Show execution mode
         if routine.has_dag() {
             let _ = writeln!(out, "\nMode: parallel (DAG)");
+        }
+
+        // Show secrets_env config
+        match &routine.secrets_env {
+            crate::parser::SecretsEnv::None => {}
+            crate::parser::SecretsEnv::Auto => {
+                let _ = writeln!(out, "\nSecrets env: auto (all secrets injected as env vars)");
+            }
+            crate::parser::SecretsEnv::List(names) => {
+                let _ = writeln!(out, "\nSecrets env: [{}]", names.join(", "));
+            }
         }
 
         // Show finally block

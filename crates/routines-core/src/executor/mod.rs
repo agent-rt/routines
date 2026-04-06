@@ -171,6 +171,16 @@ fn execute_step(
         }
     }
 
+    // Compute secrets to inject as env vars based on routine.secrets_env
+    let secrets_env_map = match &routine.secrets_env {
+        crate::parser::SecretsEnv::None => HashMap::new(),
+        crate::parser::SecretsEnv::Auto => secrets.clone(),
+        crate::parser::SecretsEnv::List(names) => names
+            .iter()
+            .filter_map(|name| secrets.get(name).map(|v| (name.clone(), v.clone())))
+            .collect(),
+    };
+
     match &step.action {
         StepAction::Cli {
             command,
@@ -188,6 +198,7 @@ fn execute_step(
                 working_dir_template: working_dir.as_deref(),
                 timeout: step.timeout,
                 strict_mode: routine.strict_mode,
+                secrets_env: &secrets_env_map,
             },
             ctx,
         ),
@@ -1780,5 +1791,102 @@ steps:
 
         let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
         assert!(result.output.is_none());
+    }
+
+    #[test]
+    fn secrets_env_auto_injects() {
+        let routine = Routine::from_yaml(
+            r#"
+name: env_test
+description: test
+secrets_env: auto
+steps:
+  - id: check
+    type: cli
+    command: /bin/sh
+    args: ["-c", "printf '%s' \"$MY_SECRET\""]
+"#,
+        )
+        .unwrap();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("MY_SECRET".to_string(), "hunter2".to_string());
+        let result = run_routine(&routine, HashMap::new(), secrets).unwrap();
+        assert_eq!(result.status, RunStatus::Success);
+        assert_eq!(result.step_results[0].stdout, "hunter2");
+    }
+
+    #[test]
+    fn secrets_env_list_filters() {
+        let routine = Routine::from_yaml(
+            r#"
+name: env_test
+description: test
+secrets_env:
+  - ALLOWED_KEY
+steps:
+  - id: check_allowed
+    type: cli
+    command: /bin/sh
+    args: ["-c", "printf '%s' \"$ALLOWED_KEY\""]
+  - id: check_blocked
+    type: cli
+    command: /bin/sh
+    args: ["-c", "printf '%s' \"$BLOCKED_KEY\""]
+"#,
+        )
+        .unwrap();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("ALLOWED_KEY".to_string(), "yes".to_string());
+        secrets.insert("BLOCKED_KEY".to_string(), "no".to_string());
+        let result = run_routine(&routine, HashMap::new(), secrets).unwrap();
+        assert_eq!(result.step_results[0].stdout, "yes");
+        assert_eq!(result.step_results[1].stdout, ""); // not injected
+    }
+
+    #[test]
+    fn step_env_overrides_secrets_env() {
+        let routine = Routine::from_yaml(
+            r#"
+name: env_test
+description: test
+secrets_env: auto
+steps:
+  - id: check
+    type: cli
+    command: /bin/sh
+    args: ["-c", "printf '%s' \"$MY_VAR\""]
+    env:
+      MY_VAR: "step_value"
+"#,
+        )
+        .unwrap();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("MY_VAR".to_string(), "secret_value".to_string());
+        let result = run_routine(&routine, HashMap::new(), secrets).unwrap();
+        assert_eq!(result.step_results[0].stdout, "step_value"); // step env wins
+    }
+
+    #[test]
+    fn no_secrets_env_does_not_inject() {
+        let routine = Routine::from_yaml(
+            r#"
+name: env_test
+description: test
+steps:
+  - id: check
+    type: cli
+    command: /bin/sh
+    args: ["-c", "printf '%s' \"$MY_SECRET\""]
+"#,
+        )
+        .unwrap();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("MY_SECRET".to_string(), "should_not_appear".to_string());
+        let result = run_routine(&routine, HashMap::new(), secrets).unwrap();
+        assert_eq!(result.step_results[0].stdout, ""); // not injected
     }
 }
