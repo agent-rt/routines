@@ -5,11 +5,13 @@ mod routine;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
-use crate::parser::{BackoffStrategy, InputDef, InputType, OnFail, OutputFormat, Routine, Step, StepAction};
+use crate::parser::{
+    BackoffStrategy, InputDef, InputType, OnFail, OutputFormat, Routine, Step, StepAction,
+};
 
 /// Structured diagnostic for Agent-parseable error context.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -234,7 +236,14 @@ pub fn run_routine_with_mocks(
             })
             .collect()
     });
-    run_routine_with_depth(routine, inputs, secrets, default_routines_dir(), 0, ctx_mocks)
+    run_routine_with_depth(
+        routine,
+        inputs,
+        secrets,
+        default_routines_dir(),
+        0,
+        ctx_mocks,
+    )
 }
 
 /// Execute a single step in isolation (for debugging/run_step).
@@ -428,8 +437,8 @@ fn execute_step(
         } => {
             let start = std::time::Instant::now();
             let resolved_input = ctx.resolve(input, &step.id)?;
-            let json_input: serde_json::Value = serde_json::from_str(&resolved_input)
-                .map_err(|e| RoutineError::Transform {
+            let json_input: serde_json::Value =
+                serde_json::from_str(&resolved_input).map_err(|e| RoutineError::Transform {
                     step_id: step.id.clone(),
                     message: format!("input is not valid JSON: {e}"),
                 })?;
@@ -447,7 +456,11 @@ fn execute_step(
                 }
                 resolved
             });
-            match crate::transform::apply(&json_input, resolved_select.as_deref(), resolved_mapping.as_ref()) {
+            match crate::transform::apply(
+                &json_input,
+                resolved_select.as_deref(),
+                resolved_mapping.as_ref(),
+            ) {
                 Ok(output) => {
                     let stdout = serde_json::to_string(&output).unwrap_or_default();
                     Ok(StepResult {
@@ -467,11 +480,18 @@ fn execute_step(
                         .unwrap_or_default();
                     let err_msg = e.to_string();
                     let (error_type, suggestion) = if err_msg.contains("cannot convert") {
-                        (DiagnosticType::TransformType, "check filter order or add type coercion (to_int/to_float/to_string)".to_string())
+                        (
+                            DiagnosticType::TransformType,
+                            "check filter order or add type coercion (to_int/to_float/to_string)"
+                                .to_string(),
+                        )
                     } else if err_msg.contains("null") {
                         (DiagnosticType::TransformNull, "add default() filter before conversion, e.g. .field | default('0') | to_int".to_string())
                     } else {
-                        (DiagnosticType::TransformType, format!("transform failed: {err_msg}"))
+                        (
+                            DiagnosticType::TransformType,
+                            format!("transform failed: {err_msg}"),
+                        )
                     };
                     Ok(StepResult {
                         step_id: step.id.clone(),
@@ -535,12 +555,15 @@ fn execute_step_with_retry(
         let err_msg = if result.stderr.is_empty() {
             format!("exit code {}", result.exit_code.unwrap_or(-1))
         } else {
-            result.stderr.trim().lines().next().unwrap_or("").to_string()
+            result
+                .stderr
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string()
         };
-        attempt_errors.push(format!(
-            "attempt {}/{max_attempts}: {err_msg}",
-            attempt + 1,
-        ));
+        attempt_errors.push(format!("attempt {}/{max_attempts}: {err_msg}", attempt + 1,));
         last_result = Some(result);
     }
 
@@ -619,7 +642,11 @@ fn execute_step_with_foreach(
     }
 
     let concurrency = step.concurrency.unwrap_or(1);
-    let effective_concurrency = if concurrency == 0 { items.len() } else { concurrency as usize };
+    let effective_concurrency = if concurrency == 0 {
+        items.len()
+    } else {
+        concurrency as usize
+    };
 
     let results = if effective_concurrency <= 1 {
         // Serial path
@@ -640,7 +667,10 @@ fn execute_step_with_foreach(
         results
     } else {
         // Concurrent path: process items in batches of `effective_concurrency`
-        use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
 
         let aborted = Arc::new(AtomicBool::new(false));
         let mut all_results: Vec<(usize, StepResult)> = Vec::with_capacity(items.len());
@@ -655,7 +685,12 @@ fn execute_step_with_foreach(
                 Arc::new(Mutex::new(Vec::new()));
 
             std::thread::scope(|scope| {
-                for (index, item) in items.iter().enumerate().skip(batch_start).take(batch_end - batch_start) {
+                for (index, item) in items
+                    .iter()
+                    .enumerate()
+                    .skip(batch_start)
+                    .take(batch_end - batch_start)
+                {
                     if aborted.load(Ordering::Relaxed) {
                         break;
                     }
@@ -668,7 +703,12 @@ fn execute_step_with_foreach(
 
                     scope.spawn(move || {
                         let result = execute_step_with_retry(
-                            step, routine, &ctx_snapshot, secrets, routines_dir, depth,
+                            step,
+                            routine,
+                            &ctx_snapshot,
+                            secrets,
+                            routines_dir,
+                            depth,
                         );
 
                         let mut sr = match result {
@@ -695,7 +735,10 @@ fn execute_step_with_foreach(
                 // All threads in this batch join at scope exit
             });
 
-            let batch = Arc::try_unwrap(batch_results).unwrap().into_inner().unwrap();
+            let batch = Arc::try_unwrap(batch_results)
+                .unwrap()
+                .into_inner()
+                .unwrap();
             all_results.extend(batch);
         }
 
@@ -711,11 +754,15 @@ fn execute_step_with_foreach(
             .iter()
             .map(|r| {
                 let trimmed = r.stdout.trim();
-                serde_json::from_str(trimmed).unwrap_or_else(|_| serde_json::Value::String(trimmed.to_string()))
+                serde_json::from_str(trimmed)
+                    .unwrap_or_else(|_| serde_json::Value::String(trimmed.to_string()))
             })
             .collect();
         let aggregated = serde_json::to_string(&collected).unwrap_or_else(|_| "[]".to_string());
-        let last_stderr = results.last().map(|r| r.stderr.trim().to_string()).unwrap_or_default();
+        let last_stderr = results
+            .last()
+            .map(|r| r.stderr.trim().to_string())
+            .unwrap_or_default();
         let last_exit = results.last().and_then(|r| r.exit_code);
         ctx.add_step_output(
             step.id.clone(),
@@ -732,9 +779,10 @@ fn execute_step_with_foreach(
 
 /// Resolve the routine's output template, if declared.
 fn resolve_output(routine: &Routine, ctx: &Context) -> Option<String> {
-    routine.output.as_ref().and_then(|template| {
-        ctx.resolve(template, "_output").ok()
-    })
+    routine
+        .output
+        .as_ref()
+        .and_then(|template| ctx.resolve(template, "_output").ok())
 }
 
 /// Execute finally steps sequentially. Always runs, regardless of main step results.
@@ -818,12 +866,23 @@ fn run_sequential(
                 status: StepStatus::Failed,
                 exit_code: None,
                 stdout: String::new(),
-                stderr: format!("routine timeout exceeded ({}s)", routine.routine_timeout.unwrap_or(0)),
+                stderr: format!(
+                    "routine timeout exceeded ({}s)",
+                    routine.routine_timeout.unwrap_or(0)
+                ),
                 execution_time_ms: 0,
                 diagnostic: None,
             });
             let run_status = RunStatus::Failed;
-            run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+            run_finally(
+                routine,
+                &mut ctx,
+                &secrets,
+                &routines_dir,
+                depth,
+                &run_status,
+                &mut step_results,
+            );
             let output = resolve_output(routine, &ctx);
             return Ok(RunResult {
                 status: run_status,
@@ -861,7 +920,15 @@ fn run_sequential(
             && !any_failed
         {
             let run_status = RunStatus::Failed;
-            run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+            run_finally(
+                routine,
+                &mut ctx,
+                &secrets,
+                &routines_dir,
+                depth,
+                &run_status,
+                &mut step_results,
+            );
             let output = resolve_output(routine, &ctx);
             return Ok(RunResult {
                 status: run_status,
@@ -877,7 +944,15 @@ fn run_sequential(
             } else {
                 // Run finally before returning
                 let run_status = RunStatus::Failed;
-                run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+                run_finally(
+                    routine,
+                    &mut ctx,
+                    &secrets,
+                    &routines_dir,
+                    depth,
+                    &run_status,
+                    &mut step_results,
+                );
                 let output = resolve_output(routine, &ctx);
                 return Ok(RunResult {
                     status: run_status,
@@ -895,7 +970,15 @@ fn run_sequential(
         RunStatus::Success
     };
 
-    run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+    run_finally(
+        routine,
+        &mut ctx,
+        &secrets,
+        &routines_dir,
+        depth,
+        &run_status,
+        &mut step_results,
+    );
     let output = resolve_output(routine, &ctx);
 
     Ok(RunResult {
@@ -932,7 +1015,8 @@ fn run_dag(
     // Shared state for DAG scheduling
     let ctx = Arc::new(Mutex::new(ctx));
     let completed: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-    let results: Arc<Mutex<HashMap<String, Vec<StepResult>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let results: Arc<Mutex<HashMap<String, Vec<StepResult>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let in_degree = Arc::new(Mutex::new(in_degree));
     let aborted = Arc::new(Mutex::new(false));
     let notify = Arc::new(Condvar::new());
@@ -1005,7 +1089,12 @@ fn run_dag(
                 handles.push(scope.spawn(move || {
                     let mut ctx_snapshot = ctx.lock().unwrap().clone();
                     let step_results = execute_step_with_foreach(
-                        step, routine, &mut ctx_snapshot, &secrets, &routines_dir, depth,
+                        step,
+                        routine,
+                        &mut ctx_snapshot,
+                        &secrets,
+                        &routines_dir,
+                        depth,
                     );
 
                     let step_results = match step_results {
@@ -1053,7 +1142,10 @@ fn run_dag(
                     }
 
                     // Store all results (multiple for foreach)
-                    results_ref.lock().unwrap().insert(step.id.clone(), step_results);
+                    results_ref
+                        .lock()
+                        .unwrap()
+                        .insert(step.id.clone(), step_results);
                     completed.lock().unwrap().insert(step.id.clone());
                     notify.notify_all();
                 }));
@@ -1081,7 +1173,10 @@ fn run_dag(
                                     && *count > 0
                                 {
                                     *count -= 1;
-                                    if *count == 0 && !comp.contains(d) && !ready.iter().any(|r| r == d) {
+                                    if *count == 0
+                                        && !comp.contains(d)
+                                        && !ready.iter().any(|r| r == d)
+                                    {
                                         ready.push_back(d.to_string());
                                     }
                                 }
@@ -1136,7 +1231,15 @@ fn run_dag(
     let mut ctx = Arc::try_unwrap(ctx)
         .map(|m| m.into_inner().unwrap())
         .unwrap_or_else(|arc| arc.lock().unwrap().clone());
-    run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
+    run_finally(
+        routine,
+        &mut ctx,
+        &secrets,
+        &routines_dir,
+        depth,
+        &run_status,
+        &mut step_results,
+    );
     let output = resolve_output(routine, &ctx);
 
     Ok(RunResult {
@@ -1413,9 +1516,15 @@ steps:
         )
         .unwrap();
 
-        let result =
-            run_routine_with_depth(&routine, HashMap::new(), HashMap::new(), tmp.clone(), 0, None)
-                .unwrap();
+        let result = run_routine_with_depth(
+            &routine,
+            HashMap::new(),
+            HashMap::new(),
+            tmp.clone(),
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(result.status, RunStatus::Failed);
         assert!(result.step_results[0].stderr.contains("not found"));
 
@@ -1453,9 +1562,15 @@ steps:
         )
         .unwrap();
 
-        let result =
-            run_routine_with_depth(&routine, HashMap::new(), HashMap::new(), tmp.clone(), 0, None)
-                .unwrap();
+        let result = run_routine_with_depth(
+            &routine,
+            HashMap::new(),
+            HashMap::new(),
+            tmp.clone(),
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(result.status, RunStatus::Failed);
         assert!(result.step_results[0].stderr.contains("depth"));
 
@@ -1909,9 +2024,18 @@ steps:
         assert_eq!(result.status, RunStatus::Success);
         // check step should see aggregated JSON array of all iteration stdouts
         let check_stdout = &result.step_results.last().unwrap().stdout;
-        assert!(check_stdout.contains("first"), "should contain 'first': {check_stdout}");
-        assert!(check_stdout.contains("second"), "should contain 'second': {check_stdout}");
-        assert!(check_stdout.contains("last"), "should contain 'last': {check_stdout}");
+        assert!(
+            check_stdout.contains("first"),
+            "should contain 'first': {check_stdout}"
+        );
+        assert!(
+            check_stdout.contains("second"),
+            "should contain 'second': {check_stdout}"
+        );
+        assert!(
+            check_stdout.contains("last"),
+            "should contain 'last': {check_stdout}"
+        );
     }
 
     #[test]
@@ -1999,8 +2123,14 @@ output: "{{ format.stdout }}"
         let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
         assert_eq!(result.status, RunStatus::Success);
         let output = result.output.unwrap();
-        assert!(output.contains("alice"), "output should contain alice: {output}");
-        assert!(output.contains("bob"), "output should contain bob: {output}");
+        assert!(
+            output.contains("alice"),
+            "output should contain alice: {output}"
+        );
+        assert!(
+            output.contains("bob"),
+            "output should contain bob: {output}"
+        );
     }
 
     #[test]
@@ -2062,9 +2192,18 @@ steps:
         let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
         assert_eq!(result.status, RunStatus::Success);
         let check_stdout = &result.step_results.last().unwrap().stdout;
-        assert!(check_stdout.contains("aaa"), "should contain aaa: {check_stdout}");
-        assert!(check_stdout.contains("bbb"), "should contain bbb: {check_stdout}");
-        assert!(check_stdout.contains("ccc"), "should contain ccc: {check_stdout}");
+        assert!(
+            check_stdout.contains("aaa"),
+            "should contain aaa: {check_stdout}"
+        );
+        assert!(
+            check_stdout.contains("bbb"),
+            "should contain bbb: {check_stdout}"
+        );
+        assert!(
+            check_stdout.contains("ccc"),
+            "should contain ccc: {check_stdout}"
+        );
     }
 
     #[test]
@@ -2091,7 +2230,12 @@ steps:
         let result = run_routine(&routine, HashMap::new(), HashMap::new()).unwrap();
         assert_eq!(result.status, RunStatus::Failed);
         // At least one should have failed
-        assert!(result.step_results.iter().any(|r| r.status == StepStatus::Failed));
+        assert!(
+            result
+                .step_results
+                .iter()
+                .any(|r| r.status == StepStatus::Failed)
+        );
     }
 
     #[test]
@@ -2616,10 +2760,7 @@ steps:
         // The slow step may fail by step timeout or routine timeout;
         // the 'after' step should be skipped with timeout message
         let after_result = result.step_results.iter().find(|r| r.step_id == "after");
-        assert!(
-            after_result.is_none()
-                || after_result.unwrap().stderr.contains("routine timeout")
-        );
+        assert!(after_result.is_none() || after_result.unwrap().stderr.contains("routine timeout"));
     }
 
     #[test]

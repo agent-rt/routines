@@ -77,11 +77,16 @@ impl<'de> serde::Deserialize<'de> for SecretsEnv {
                 match v {
                     "none" => Ok(SecretsEnv::None),
                     "auto" => Ok(SecretsEnv::Auto),
-                    _ => Err(E::custom(format!("unknown secrets_env value: '{v}', expected 'none' or 'auto'"))),
+                    _ => Err(E::custom(format!(
+                        "unknown secrets_env value: '{v}', expected 'none' or 'auto'"
+                    ))),
                 }
             }
 
-            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+            fn visit_seq<A: de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
                 let mut items = Vec::new();
                 while let Some(item) = seq.next_element::<String>()? {
                     items.push(item);

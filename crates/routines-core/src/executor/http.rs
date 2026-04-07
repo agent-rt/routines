@@ -133,7 +133,12 @@ pub(super) fn execute(
             let status_text = format!("HTTP {status_code} {method} {url}");
 
             let diagnostic = if !success {
-                Some(http_diagnostic(step_id, status_code, &url, &resolved_headers))
+                Some(http_diagnostic(
+                    step_id,
+                    status_code,
+                    &url,
+                    &resolved_headers,
+                ))
             } else {
                 None
             };
@@ -154,11 +159,18 @@ pub(super) fn execute(
         }
         Err(e) => {
             let err_str = e.to_string();
-            let (error_type, suggestion) = if err_str.contains("timed out") || err_str.contains("timeout") {
-                (DiagnosticType::CliTimeout, "increase timeout or check network connectivity".to_string())
-            } else {
-                (DiagnosticType::HttpClientError, format!("HTTP request failed: {e}"))
-            };
+            let (error_type, suggestion) =
+                if err_str.contains("timed out") || err_str.contains("timeout") {
+                    (
+                        DiagnosticType::CliTimeout,
+                        "increase timeout or check network connectivity".to_string(),
+                    )
+                } else {
+                    (
+                        DiagnosticType::HttpClientError,
+                        format!("HTTP request failed: {e}"),
+                    )
+                };
             Ok(StepResult {
                 step_id: step_id.to_string(),
                 status: StepStatus::Failed,
@@ -186,7 +198,9 @@ fn http_diagnostic(
     url: &str,
     headers: &[(String, String)],
 ) -> Diagnostic {
-    let has_auth = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+    let has_auth = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
 
     let (error_type, suggestion, fix_hint) = match status_code {
         401 => (

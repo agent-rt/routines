@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 pub fn resolve_routine_path(name: &str, routines_dir: &Path) -> PathBuf {
     if let Some(rest) = name.strip_prefix('@') {
         // Remote registry: @registry/path
-        routines_dir
-            .join("registries")
-            .join(format!("{rest}.yml"))
+        routines_dir.join("registries").join(format!("{rest}.yml"))
     } else if name.contains('/') {
         // Local namespace: namespace/name
         routines_dir.join("hub").join(format!("{name}.yml"))
@@ -60,8 +58,10 @@ mod tests {
 
     #[test]
     fn resolve_registry_with_namespace() {
-        let path =
-            resolve_routine_path("@shared-ops/deploy/frontend", Path::new("/home/user/.routines"));
+        let path = resolve_routine_path(
+            "@shared-ops/deploy/frontend",
+            Path::new("/home/user/.routines"),
+        );
         assert_eq!(
             path,
             PathBuf::from("/home/user/.routines/registries/shared-ops/deploy/frontend.yml")

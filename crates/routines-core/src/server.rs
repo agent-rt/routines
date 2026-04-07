@@ -236,7 +236,13 @@ fn render_output_for_mcp(output: &str, format: &crate::parser::OutputFormat) -> 
     let mut lines = Vec::with_capacity(rows.len() + 1);
 
     // Header
-    lines.push(columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(" "));
+    lines.push(
+        columns
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
 
     // Rows
     for row in &rows {
@@ -265,29 +271,58 @@ fn collect_step_templates(step: &crate::parser::Step) -> Vec<String> {
         templates.push(when.clone());
     }
     match &step.action {
-        StepAction::Cli { command, args, stdin, env, working_dir } => {
+        StepAction::Cli {
+            command,
+            args,
+            stdin,
+            env,
+            working_dir,
+        } => {
             templates.push(command.clone());
             templates.extend(args.iter().cloned());
-            if let Some(s) = stdin { templates.push(s.clone()); }
+            if let Some(s) = stdin {
+                templates.push(s.clone());
+            }
             templates.extend(env.values().cloned());
-            if let Some(w) = working_dir { templates.push(w.clone()); }
+            if let Some(w) = working_dir {
+                templates.push(w.clone());
+            }
         }
-        StepAction::Http { url, method, headers, body } => {
+        StepAction::Http {
+            url,
+            method,
+            headers,
+            body,
+        } => {
             templates.push(url.clone());
             templates.push(method.clone());
             templates.extend(headers.values().cloned());
-            if let Some(b) = body { templates.push(b.clone()); }
+            if let Some(b) = body {
+                templates.push(b.clone());
+            }
         }
-        StepAction::Transform { input, select, mapping } => {
+        StepAction::Transform {
+            input,
+            select,
+            mapping,
+        } => {
             templates.push(input.clone());
-            if let Some(s) = select { templates.push(s.clone()); }
-            if let Some(m) = mapping { templates.extend(m.values().cloned()); }
+            if let Some(s) = select {
+                templates.push(s.clone());
+            }
+            if let Some(m) = mapping {
+                templates.extend(m.values().cloned());
+            }
         }
         StepAction::Routine { name, inputs } => {
             templates.push(name.clone());
             templates.extend(inputs.values().cloned());
         }
-        StepAction::Mcp { server, tool, arguments } => {
+        StepAction::Mcp {
+            server,
+            tool,
+            arguments,
+        } => {
             templates.push(server.clone());
             templates.push(tool.clone());
             templates.extend(arguments.values().map(|v| v.to_string()));
@@ -340,7 +375,9 @@ fn generate_routine_yaml(session: &ExploreSession) -> String {
     for es in &session.steps {
         let rest = es.step_yaml.as_str();
         for cap in find_template_vars(rest) {
-            if let Some(name) = cap.strip_prefix("inputs.")  && seen_inputs.insert(name.to_string()) {
+            if let Some(name) = cap.strip_prefix("inputs.")
+                && seen_inputs.insert(name.to_string())
+            {
                 input_names.push(name.to_string());
             }
         }
@@ -389,10 +426,7 @@ fn find_template_vars(text: &str) -> Vec<String> {
 
 /// Recursively collect routine YAML files under a directory.
 /// Returns (relative_name, Routine) pairs sorted by name.
-pub fn collect_routines_recursive(
-    dir: &std::path::Path,
-    prefix: &str,
-) -> Vec<(String, Routine)> {
+pub fn collect_routines_recursive(dir: &std::path::Path, prefix: &str) -> Vec<(String, Routine)> {
     let mut results = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return results;
@@ -492,8 +526,7 @@ impl RoutinesMcpServer {
                         let _ = writeln!(out);
                     }
                     for (name, routine) in &entries {
-                        let inputs_desc =
-                            format_inputs(&routine.inputs, &mut has_required);
+                        let inputs_desc = format_inputs(&routine.inputs, &mut has_required);
                         let _ = writeln!(
                             out,
                             "@{reg_name}/{name} — {}{inputs_desc}",
@@ -515,7 +548,9 @@ impl RoutinesMcpServer {
         text_ok(out.trim().to_string())
     }
 
-    #[tool(description = "Routine meta-operations: schema/get/create/validate/dry_run/test/history/log/run_step/explore/solidify")]
+    #[tool(
+        description = "Routine meta-operations: schema/get/create/validate/dry_run/test/history/log/run_step/explore/solidify"
+    )]
     async fn meta(
         &self,
         Parameters(params): Parameters<MetaParams>,
@@ -702,7 +737,11 @@ impl RoutinesMcpServer {
                 let mut out = String::new();
                 let _ = writeln!(out, "{} {} {}", log.routine_name, log.status, log.run_id);
                 for step in &log.steps {
-                    let icon = if step.status == "SUCCESS" { "OK" } else { "FAIL" };
+                    let icon = if step.status == "SUCCESS" {
+                        "OK"
+                    } else {
+                        "FAIL"
+                    };
                     let _ = writeln!(
                         out,
                         "[{icon}] {} exit={} {}ms",
@@ -732,9 +771,9 @@ impl RoutinesMcpServer {
             "run_step" => {
                 // Session-based explore mode: execute standalone step YAML
                 if let Some(ref session_id) = params.session {
-                    let step_yaml = params
-                        .step_yaml
-                        .ok_or_else(|| err_params("'step_yaml' required for run_step with session".into()))?;
+                    let step_yaml = params.step_yaml.ok_or_else(|| {
+                        err_params("'step_yaml' required for run_step with session".into())
+                    })?;
 
                     // Parse step YAML into a Step
                     let step: crate::parser::Step = serde_yaml::from_str(&step_yaml)
@@ -790,7 +829,13 @@ impl RoutinesMcpServer {
                         }
                     }
 
-                    let result = executor::execute_single_step(&step, &routine, &ctx, &secret_map, &routines_dir());
+                    let result = executor::execute_single_step(
+                        &step,
+                        &routine,
+                        &ctx,
+                        &secret_map,
+                        &routines_dir(),
+                    );
                     match result {
                         Ok(sr) => {
                             let status_str = match sr.status {
@@ -826,7 +871,12 @@ impl RoutinesMcpServer {
                                         step_id: sr.step_id.clone(),
                                         stdout: sr.stdout.clone(),
                                     });
-                                    let _ = write!(out, "\n(recorded to session — {}/{} steps)", session.name, session.steps.len());
+                                    let _ = write!(
+                                        out,
+                                        "\n(recorded to session — {}/{} steps)",
+                                        session.name,
+                                        session.steps.len()
+                                    );
                                 }
                             }
 
@@ -839,9 +889,11 @@ impl RoutinesMcpServer {
                 }
 
                 // Original routine-based run_step mode
-                let name = params
-                    .name
-                    .ok_or_else(|| err_params("'name' required for run_step (or provide 'session' + 'step_yaml')".into()))?;
+                let name = params.name.ok_or_else(|| {
+                    err_params(
+                        "'name' required for run_step (or provide 'session' + 'step_yaml')".into(),
+                    )
+                })?;
                 let step_id = params
                     .step_id
                     .ok_or_else(|| err_params("'step_id' required for run_step".into()))?;
@@ -885,7 +937,13 @@ impl RoutinesMcpServer {
                 }
 
                 // Execute the single step
-                let result = executor::execute_single_step(step, &routine, &ctx, &secret_map, &routines_dir());
+                let result = executor::execute_single_step(
+                    step,
+                    &routine,
+                    &ctx,
+                    &secret_map,
+                    &routines_dir(),
+                );
                 match result {
                     Ok(sr) => {
                         let status = match sr.status {
@@ -925,10 +983,14 @@ impl RoutinesMcpServer {
                 let description = params.description.unwrap_or_else(|| name.clone());
 
                 // Generate session ID
-                let session_id = format!("es_{:x}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() & 0xFFFFFFFF);
+                let session_id = format!(
+                    "es_{:x}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        & 0xFFFFFFFF
+                );
 
                 let session = ExploreSession {
                     name: name.clone(),
@@ -955,19 +1017,23 @@ impl RoutinesMcpServer {
 
                 let session = {
                     let mut store = self.sessions.lock().unwrap();
-                    store.remove(&session_id)
-                        .ok_or_else(|| err_params(format!("Session '{session_id}' not found or expired")))?
+                    store.remove(&session_id).ok_or_else(|| {
+                        err_params(format!("Session '{session_id}' not found or expired"))
+                    })?
                 };
 
                 if session.steps.is_empty() {
-                    return Err(err_params("Session has no recorded steps — run some steps first".into()));
+                    return Err(err_params(
+                        "Session has no recorded steps — run some steps first".into(),
+                    ));
                 }
 
                 // Generate routine YAML from recorded steps
                 let yaml = generate_routine_yaml(&session);
                 return text_ok(format!(
                     "solidified {}/{} steps into routine YAML:\n---\n{yaml}",
-                    session.name, session.steps.len()
+                    session.name,
+                    session.steps.len()
                 ));
             }
             other => {
@@ -1130,14 +1196,7 @@ impl RoutinesMcpServer {
                     tool,
                     arguments,
                 } => {
-                    let _ = writeln!(
-                        out,
-                        "[{}] {}: mcp {}:{}",
-                        i + 1,
-                        step.id,
-                        server,
-                        tool
-                    );
+                    let _ = writeln!(out, "[{}] {}: mcp {}:{}", i + 1, step.id, server, tool);
                     if !arguments.is_empty() {
                         let arg_parts: Vec<String> = arguments
                             .iter()
@@ -1231,7 +1290,10 @@ impl RoutinesMcpServer {
         match &routine.secrets_env {
             crate::parser::SecretsEnv::None => {}
             crate::parser::SecretsEnv::Auto => {
-                let _ = writeln!(out, "\nSecrets env: auto (all secrets injected as env vars)");
+                let _ = writeln!(
+                    out,
+                    "\nSecrets env: auto (all secrets injected as env vars)"
+                );
             }
             crate::parser::SecretsEnv::List(names) => {
                 let _ = writeln!(out, "\nSecrets env: [{}]", names.join(", "));
@@ -1244,9 +1306,24 @@ impl RoutinesMcpServer {
             for (i, step) in routine.finally.iter().enumerate() {
                 match &step.action {
                     StepAction::Cli { command, args, .. } => {
-                        let cmd = ctx.resolve(command, &step.id).unwrap_or_else(|e| format!("<error: {e}>"));
-                        let resolved_args: Vec<String> = args.iter().map(|a| ctx.resolve(a, &step.id).unwrap_or_else(|e| format!("<error: {e}>"))).collect();
-                        let _ = writeln!(out, "  [F{}] {}: {} {}", i + 1, step.id, cmd, resolved_args.join(" "));
+                        let cmd = ctx
+                            .resolve(command, &step.id)
+                            .unwrap_or_else(|e| format!("<error: {e}>"));
+                        let resolved_args: Vec<String> = args
+                            .iter()
+                            .map(|a| {
+                                ctx.resolve(a, &step.id)
+                                    .unwrap_or_else(|e| format!("<error: {e}>"))
+                            })
+                            .collect();
+                        let _ = writeln!(
+                            out,
+                            "  [F{}] {}: {} {}",
+                            i + 1,
+                            step.id,
+                            cmd,
+                            resolved_args.join(" ")
+                        );
                     }
                     StepAction::Http { url, method, .. } => {
                         let _ = writeln!(out, "  [F{}] {}: {} {}", i + 1, step.id, method, url);
@@ -1255,15 +1332,22 @@ impl RoutinesMcpServer {
                         let _ = writeln!(out, "  [F{}] {}: routine {}", i + 1, step.id, name);
                     }
                     StepAction::Mcp { server, tool, .. } => {
-                        let _ = writeln!(out, "  [F{}] {}: mcp {}:{}", i + 1, step.id, server, tool);
+                        let _ =
+                            writeln!(out, "  [F{}] {}: mcp {}:{}", i + 1, step.id, server, tool);
                     }
-                    StepAction::Transform { select, mapping, .. } => {
+                    StepAction::Transform {
+                        select, mapping, ..
+                    } => {
                         let _ = write!(out, "  [F{}] {}: transform", i + 1, step.id);
                         if let Some(sel) = select {
                             let _ = write!(out, " select={sel}");
                         }
                         if let Some(m) = mapping {
-                            let _ = write!(out, " fields=[{}]", m.keys().cloned().collect::<Vec<_>>().join(", "));
+                            let _ = write!(
+                                out,
+                                " fields=[{}]",
+                                m.keys().cloned().collect::<Vec<_>>().join(", ")
+                            );
                         }
                         let _ = writeln!(out);
                     }
@@ -1428,13 +1512,14 @@ impl RoutinesMcpServer {
                         }
                     } else {
                         // Fallback text hint for steps without structured diagnostic
-                        let hint = if fs.stderr.contains("timeout") || fs.stderr.contains("timed out") {
-                            "increase step/routine timeout or optimize command"
-                        } else if fs.stderr.contains("Missing required input") {
-                            "check required inputs with meta(action='get')"
-                        } else {
-                            "use meta(action='log', name='<run_id>') for full stderr"
-                        };
+                        let hint =
+                            if fs.stderr.contains("timeout") || fs.stderr.contains("timed out") {
+                                "increase step/routine timeout or optimize command"
+                            } else if fs.stderr.contains("Missing required input") {
+                                "check required inputs with meta(action='get')"
+                            } else {
+                                "use meta(action='log', name='<run_id>') for full stderr"
+                            };
                         let _ = write!(out, "hint: {hint}");
                     }
                 }
@@ -1443,7 +1528,6 @@ impl RoutinesMcpServer {
 
         text_ok(out.trim().to_string())
     }
-
 }
 
 #[tool_handler]

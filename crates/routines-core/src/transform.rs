@@ -233,8 +233,18 @@ fn apply_segment(value: &Value, segment: &PathSegment) -> Result<Value> {
         PathSegment::Slice(start, end) => match value {
             Value::Array(arr) => {
                 let len = arr.len() as i64;
-                let s = if *start < 0 { (len + start).max(0) as usize } else { (*start as usize).min(arr.len()) };
-                let e = if *end == i64::MAX { arr.len() } else if *end < 0 { (len + end).max(0) as usize } else { (*end as usize).min(arr.len()) };
+                let s = if *start < 0 {
+                    (len + start).max(0) as usize
+                } else {
+                    (*start as usize).min(arr.len())
+                };
+                let e = if *end == i64::MAX {
+                    arr.len()
+                } else if *end < 0 {
+                    (len + end).max(0) as usize
+                } else {
+                    (*end as usize).min(arr.len())
+                };
                 Ok(Value::Array(arr[s..e].to_vec()))
             }
             _ => Ok(Value::Null),
@@ -305,13 +315,20 @@ fn apply_filter(value: &Value, filter: &str) -> Result<Value> {
             let start: usize = parts[0].parse().unwrap_or(0);
             let end: usize = parts[1].parse().unwrap_or(0);
             let s = value_to_string(value);
-            let sliced: String = s.chars().skip(start).take(end.saturating_sub(start)).collect();
+            let sliced: String = s
+                .chars()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect();
             Ok(Value::String(sliced))
         }
         "split" => {
             let sep = parse_string_arg(args.unwrap_or(""));
             let s = value_to_string(value);
-            let parts: Vec<Value> = s.split(&sep).map(|p| Value::String(p.to_string())).collect();
+            let parts: Vec<Value> = s
+                .split(&sep)
+                .map(|p| Value::String(p.to_string()))
+                .collect();
             Ok(Value::Array(parts))
         }
         "join" => {
@@ -382,10 +399,13 @@ fn apply_filter(value: &Value, filter: &str) -> Result<Value> {
                 step_id: String::new(),
                 message: "take requires a count argument".into(),
             })?;
-            let n = n_str.trim().parse::<usize>().map_err(|_| RoutineError::Transform {
-                step_id: String::new(),
-                message: format!("take: cannot parse '{n_str}' as integer"),
-            })?;
+            let n = n_str
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| RoutineError::Transform {
+                    step_id: String::new(),
+                    message: format!("take: cannot parse '{n_str}' as integer"),
+                })?;
             match value {
                 Value::Array(arr) => Ok(Value::Array(arr.iter().take(n).cloned().collect())),
                 _ => Ok(value.clone()),
@@ -398,10 +418,14 @@ fn apply_filter(value: &Value, filter: &str) -> Result<Value> {
                 step_id: String::new(),
                 message: "ceil_div requires a divisor argument".into(),
             })?;
-            let divisor = divisor_str.trim().parse::<i64>().map_err(|_| RoutineError::Transform {
-                step_id: String::new(),
-                message: format!("ceil_div: cannot parse '{divisor_str}' as integer"),
-            })?;
+            let divisor =
+                divisor_str
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| RoutineError::Transform {
+                        step_id: String::new(),
+                        message: format!("ceil_div: cannot parse '{divisor_str}' as integer"),
+                    })?;
             if divisor == 0 {
                 return Err(RoutineError::Transform {
                     step_id: String::new(),
@@ -525,14 +549,21 @@ fn eval_math(expr: &str, current: f64) -> Result<f64> {
     for &op in &['+', '-', '*', '/', '%'] {
         // Find the operator (skip if it's part of a negative number at the start)
         if let Some(pos) = find_operator(&expr, op) {
-            let left: f64 = expr[..pos].trim().parse().map_err(|_| RoutineError::Transform {
-                step_id: String::new(),
-                message: format!("invalid math left operand: {}", &expr[..pos]),
-            })?;
-            let right: f64 = expr[pos + 1..].trim().parse().map_err(|_| RoutineError::Transform {
-                step_id: String::new(),
-                message: format!("invalid math right operand: {}", &expr[pos + 1..]),
-            })?;
+            let left: f64 = expr[..pos]
+                .trim()
+                .parse()
+                .map_err(|_| RoutineError::Transform {
+                    step_id: String::new(),
+                    message: format!("invalid math left operand: {}", &expr[..pos]),
+                })?;
+            let right: f64 =
+                expr[pos + 1..]
+                    .trim()
+                    .parse()
+                    .map_err(|_| RoutineError::Transform {
+                        step_id: String::new(),
+                        message: format!("invalid math right operand: {}", &expr[pos + 1..]),
+                    })?;
             return match op {
                 '+' => Ok(left + right),
                 '-' => Ok(left - right),
@@ -554,10 +585,12 @@ fn eval_math(expr: &str, current: f64) -> Result<f64> {
     }
 
     // If no operator found, try to parse as a number (identity)
-    expr.trim().parse::<f64>().map_err(|_| RoutineError::Transform {
-        step_id: String::new(),
-        message: format!("invalid math expression: {expr}"),
-    })
+    expr.trim()
+        .parse::<f64>()
+        .map_err(|_| RoutineError::Transform {
+            step_id: String::new(),
+            message: format!("invalid math expression: {expr}"),
+        })
 }
 
 /// Find operator position, skipping leading sign.
@@ -613,7 +646,10 @@ mod tests {
         mapping.insert("n".to_string(), ".name".to_string());
         mapping.insert("a".to_string(), ".age".to_string());
         let result = apply(&input, None, Some(&mapping)).unwrap();
-        assert_eq!(result, json(r#"[{"n": "Alice", "a": 30}, {"n": "Bob", "a": 25}]"#));
+        assert_eq!(
+            result,
+            json(r#"[{"n": "Alice", "a": 30}, {"n": "Bob", "a": 25}]"#)
+        );
     }
 
     #[test]
@@ -670,7 +706,10 @@ mod tests {
     fn filter_wildcard_join() {
         let input = json(r#"{"segments": [{"code": "CZ3086"}, {"code": "MU5678"}]}"#);
         let mut mapping = IndexMap::new();
-        mapping.insert("flights".to_string(), ".segments[*].code | join('/')".to_string());
+        mapping.insert(
+            "flights".to_string(),
+            ".segments[*].code | join('/')".to_string(),
+        );
         let result = apply(&input, None, Some(&mapping)).unwrap();
         assert_eq!(result, json(r#"{"flights": "CZ3086/MU5678"}"#));
     }
@@ -679,7 +718,10 @@ mod tests {
     fn filter_math_and_floor() {
         let input = json(r#"{"minutes": 285}"#);
         let mut mapping = IndexMap::new();
-        mapping.insert("hours".to_string(), ".minutes | math(_ / 60) | floor".to_string());
+        mapping.insert(
+            "hours".to_string(),
+            ".minutes | math(_ / 60) | floor".to_string(),
+        );
         let result = apply(&input, None, Some(&mapping)).unwrap();
         assert_eq!(result, json(r#"{"hours": 4}"#));
     }
@@ -785,7 +827,8 @@ mod tests {
 
     #[test]
     fn search_flight_scenario() {
-        let input = json(r#"{
+        let input = json(
+            r#"{
             "data": {
                 "itemList": [
                     {
@@ -800,25 +843,40 @@ mod tests {
                     }
                 ]
             }
-        }"#);
+        }"#,
+        );
 
         let mut mapping = IndexMap::new();
         mapping.insert("price".to_string(), ".ticketPrice".to_string());
         mapping.insert("type".to_string(), ".journeys[0].journeyType".to_string());
-        mapping.insert("duration".to_string(), ".journeys[0].totalDuration | to_int | duration_fmt".to_string());
-        mapping.insert("flights".to_string(), ".journeys[0].segments[*].marketingTransportNo | join('/')".to_string());
-        mapping.insert("dep".to_string(), ".journeys[0].segments[0].depDateTime | slice(11, 16)".to_string());
-        mapping.insert("arr".to_string(), ".journeys[0].segments[-1].arrDateTime | slice(11, 16)".to_string());
+        mapping.insert(
+            "duration".to_string(),
+            ".journeys[0].totalDuration | to_int | duration_fmt".to_string(),
+        );
+        mapping.insert(
+            "flights".to_string(),
+            ".journeys[0].segments[*].marketingTransportNo | join('/')".to_string(),
+        );
+        mapping.insert(
+            "dep".to_string(),
+            ".journeys[0].segments[0].depDateTime | slice(11, 16)".to_string(),
+        );
+        mapping.insert(
+            "arr".to_string(),
+            ".journeys[0].segments[-1].arrDateTime | slice(11, 16)".to_string(),
+        );
 
         let result = apply(&input, Some(".data.itemList"), Some(&mapping)).unwrap();
-        let expected = json(r#"[{
+        let expected = json(
+            r#"[{
             "price": 3466.0,
             "type": "直达",
             "duration": "4h45m",
             "flights": "CZ3086",
             "dep": "10:45",
             "arr": "14:30"
-        }]"#);
+        }]"#,
+        );
         assert_eq!(result, expected);
     }
 

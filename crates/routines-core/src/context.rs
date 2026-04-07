@@ -163,13 +163,14 @@ impl Context {
                     })
             }
             "_run" => match suffix {
-                "status" => self
-                    .run_status
-                    .clone()
-                    .ok_or_else(|| RoutineError::UndefinedVariable {
-                        step_id: current_step_id.to_string(),
-                        key: key.to_string(),
-                    }),
+                "status" => {
+                    self.run_status
+                        .clone()
+                        .ok_or_else(|| RoutineError::UndefinedVariable {
+                            step_id: current_step_id.to_string(),
+                            key: key.to_string(),
+                        })
+                }
                 _ => Err(RoutineError::UndefinedVariable {
                     step_id: current_step_id.to_string(),
                     key: key.to_string(),
@@ -189,11 +190,8 @@ impl Context {
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "-1".to_string())),
                     "stdout_lines" => {
-                        let lines: Vec<&str> = output
-                            .stdout
-                            .lines()
-                            .filter(|l| !l.is_empty())
-                            .collect();
+                        let lines: Vec<&str> =
+                            output.stdout.lines().filter(|l| !l.is_empty()).collect();
                         Ok(serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_string()))
                     }
                     _ => Err(RoutineError::UndefinedVariable {

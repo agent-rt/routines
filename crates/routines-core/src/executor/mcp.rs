@@ -33,10 +33,7 @@ pub(super) fn execute(params: &McpParams, ctx: &Context) -> Result<StepResult> {
                 status: StepStatus::Failed,
                 exit_code: Some(2),
                 stdout: String::new(),
-                stderr: format!(
-                    "MCP server '{}' not found in mcp.json",
-                    params.server
-                ),
+                stderr: format!("MCP server '{}' not found in mcp.json", params.server),
                 execution_time_ms: start.elapsed().as_millis() as u64,
                 diagnostic: None,
             });
@@ -84,8 +81,7 @@ pub(super) fn execute(params: &McpParams, ctx: &Context) -> Result<StepResult> {
         .map_err(|_| format!("MCP server initialization timed out after {timeout_secs}s"))?
         .map_err(|e| format!("MCP initialization failed: {e}"))?;
 
-        let call_params =
-            CallToolRequestParams::new(tool_name).with_arguments(resolved_args);
+        let call_params = CallToolRequestParams::new(tool_name).with_arguments(resolved_args);
 
         let tool_result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),

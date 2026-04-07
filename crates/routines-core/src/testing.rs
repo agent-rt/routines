@@ -62,14 +62,12 @@ pub struct TestResult {
 
 impl TestSuite {
     pub fn from_file(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(RoutineError::Io)?;
+        let content = std::fs::read_to_string(path).map_err(RoutineError::Io)?;
         Self::from_yaml(&content)
     }
 
     pub fn from_yaml(yaml: &str) -> Result<Self> {
-        serde_yaml::from_str(yaml)
-            .map_err(RoutineError::YamlParse)
+        serde_yaml::from_str(yaml).map_err(RoutineError::YamlParse)
     }
 }
 
@@ -116,9 +114,7 @@ fn run_test_case(routine: &Routine, case: &TestCase, routines_dir: &Path) -> Tes
                     RunStatus::Failed => "failed",
                 };
                 if actual != expected_status.to_lowercase() {
-                    failures.push(format!(
-                        "status: expected {expected_status}, got {actual}"
-                    ));
+                    failures.push(format!("status: expected {expected_status}, got {actual}"));
                 }
             }
 
@@ -126,10 +122,7 @@ fn run_test_case(routine: &Routine, case: &TestCase, routines_dir: &Path) -> Tes
             if let Some(needle) = &case.assertions.output_contains {
                 let output = run_result.output.as_deref().unwrap_or("");
                 if !output.contains(needle.as_str()) {
-                    failures.push(format!(
-                        "output_contains: '{}' not found in output",
-                        needle
-                    ));
+                    failures.push(format!("output_contains: '{}' not found in output", needle));
                 }
             }
 
@@ -165,9 +158,8 @@ fn run_test_case(routine: &Routine, case: &TestCase, routines_dir: &Path) -> Tes
                             ));
                         }
                         None => {
-                            failures.push(format!(
-                                "step_status[{step_id}]: step not found in results"
-                            ));
+                            failures
+                                .push(format!("step_status[{step_id}]: step not found in results"));
                         }
                     }
                 }
@@ -214,10 +206,16 @@ tests:
         assert_eq!(suite.routine, "greet");
         assert_eq!(suite.tests.len(), 1);
         assert_eq!(suite.tests[0].name, "basic");
-        assert_eq!(suite.tests[0].mocks["say_hi"].stdout, Some("Hello world".into()));
+        assert_eq!(
+            suite.tests[0].mocks["say_hi"].stdout,
+            Some("Hello world".into())
+        );
         assert_eq!(suite.tests[0].mocks["say_hi"].exit_code, Some(0));
         assert_eq!(suite.tests[0].assertions.status, Some("success".into()));
-        assert_eq!(suite.tests[0].assertions.output_contains, Some("Hello".into()));
+        assert_eq!(
+            suite.tests[0].assertions.output_contains,
+            Some("Hello".into())
+        );
     }
 
     #[test]
@@ -262,10 +260,7 @@ tests:
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tmp = std::env::temp_dir().join(format!(
-            "routines_test_{}_{id}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("routines_test_{}_{id}", std::process::id()));
         let hub = tmp.join("hub");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&hub).unwrap();
@@ -500,7 +495,15 @@ tests:
 "#;
         let results = run_test_with_routine(routine, test);
         assert_eq!(results.len(), 2);
-        assert!(results[0].passed, "pass_case failed: {:?}", results[0].failures);
-        assert!(results[1].passed, "fail_case failed: {:?}", results[1].failures);
+        assert!(
+            results[0].passed,
+            "pass_case failed: {:?}",
+            results[0].failures
+        );
+        assert!(
+            results[1].passed,
+            "fail_case failed: {:?}",
+            results[1].failures
+        );
     }
 }

@@ -36,7 +36,11 @@ pub enum RoutineError {
     McpConfig(String),
 
     #[error("Invalid input '{name}': expected {expected}, got '{got}'")]
-    InvalidInput { name: String, expected: String, got: String },
+    InvalidInput {
+        name: String,
+        expected: String,
+        got: String,
+    },
 
     #[error("Transform error in step '{step_id}': {message}")]
     Transform { step_id: String, message: String },

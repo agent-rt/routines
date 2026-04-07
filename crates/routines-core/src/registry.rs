@@ -117,7 +117,10 @@ pub fn sync_registry(name: &str, config: &RegistryConfig, routines_dir: &Path) -
             )));
         }
 
-        Ok(format!("Cloned '{name}' from {} ({})", config.url, config.git_ref))
+        Ok(format!(
+            "Cloned '{name}' from {} ({})",
+            config.url, config.git_ref
+        ))
     }
 }
 
@@ -170,7 +173,10 @@ mod tests {
 
         let loaded = Registries::load(&tmp).unwrap();
         assert!(loaded.registries.contains_key("test-reg"));
-        assert_eq!(loaded.registries["test-reg"].url, "https://github.com/test/repo");
+        assert_eq!(
+            loaded.registries["test-reg"].url,
+            "https://github.com/test/repo"
+        );
         assert_eq!(loaded.registries["test-reg"].git_ref, "v1.0");
 
         std::fs::remove_dir_all(&tmp).ok();

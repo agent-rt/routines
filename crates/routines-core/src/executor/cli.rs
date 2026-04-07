@@ -53,8 +53,8 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
 
     let mut cmd = Command::new(&resolved_command);
     cmd.args(&resolved_args)
-        .envs(params.secrets_env)  // secrets_env first (lower priority)
-        .envs(&resolved_env)       // step-level env overrides
+        .envs(params.secrets_env) // secrets_env first (lower priority)
+        .envs(&resolved_env) // step-level env overrides
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
         } else {
@@ -117,7 +117,9 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
                                 error_type: DiagnosticType::CliTimeout,
                                 status_code: None,
                                 resolved_url: None,
-                                suggestion: format!("increase timeout (current: {timeout_secs}s) or optimize command"),
+                                suggestion: format!(
+                                    "increase timeout (current: {timeout_secs}s) or optimize command"
+                                ),
                                 fix_hint: None,
                             }),
                         });

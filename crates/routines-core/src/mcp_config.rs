@@ -141,10 +141,7 @@ mod tests {
             command: "cmd".to_string(),
             args: vec![],
             env: HashMap::from([
-                (
-                    "TOKEN".to_string(),
-                    "{{ secrets.SLACK_TOKEN }}".to_string(),
-                ),
+                ("TOKEN".to_string(), "{{ secrets.SLACK_TOKEN }}".to_string()),
                 ("PLAIN".to_string(), "value".to_string()),
             ]),
         };

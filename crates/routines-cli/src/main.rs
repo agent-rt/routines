@@ -193,12 +193,15 @@ fn cmd_list() -> routines_core::error::Result<()> {
     let mut has_output = false;
 
     if hub_dir.exists() {
-        let entries =
-            routines_core::server::collect_routines_recursive(&hub_dir, "");
+        let entries = routines_core::server::collect_routines_recursive(&hub_dir, "");
         for (ref_name, routine) in &entries {
             let inputs_desc = format_inputs_cli(&routine.inputs, &mut has_required);
             if is_tty {
-                println!("{:<20} — {}{inputs_desc}", ref_name.bold(), routine.description);
+                println!(
+                    "{:<20} — {}{inputs_desc}",
+                    ref_name.bold(),
+                    routine.description
+                );
             } else {
                 println!("{ref_name} — {}{inputs_desc}", routine.description);
             }
@@ -222,7 +225,11 @@ fn cmd_list() -> routines_core::error::Result<()> {
                     let inputs_desc = format_inputs_cli(&routine.inputs, &mut has_required);
                     let full_name = format!("@{reg_name}/{name}");
                     if is_tty {
-                        println!("{:<20} — {}{inputs_desc}", full_name.bold(), routine.description);
+                        println!(
+                            "{:<20} — {}{inputs_desc}",
+                            full_name.bold(),
+                            routine.description
+                        );
                     } else {
                         println!("{full_name} — {}{inputs_desc}", routine.description);
                     }
@@ -243,7 +250,10 @@ fn cmd_list() -> routines_core::error::Result<()> {
     Ok(())
 }
 
-fn format_inputs_cli(inputs: &[routines_core::parser::InputDef], has_required: &mut bool) -> String {
+fn format_inputs_cli(
+    inputs: &[routines_core::parser::InputDef],
+    has_required: &mut bool,
+) -> String {
     if inputs.is_empty() {
         return String::new();
     }
@@ -356,18 +366,9 @@ fn cmd_test(file: Option<&std::path::Path>, all: bool) -> routines_core::error::
 
     eprintln!();
     if total_fail == 0 {
-        eprintln!(
-            "{} {} passed",
-            "✓".green(),
-            total_pass
-        );
+        eprintln!("{} {} passed", "✓".green(), total_pass);
     } else {
-        eprintln!(
-            "{} {} passed, {} failed",
-            "✗".red(),
-            total_pass,
-            total_fail
-        );
+        eprintln!("{} {} passed, {} failed", "✗".red(), total_pass, total_fail);
         std::process::exit(1);
     }
 
@@ -421,12 +422,17 @@ fn prompt_missing_inputs(
                     .prompt();
                 match ans {
                     Ok(v) => Some(v.to_string()),
-                    Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                    Err(
+                        inquire::InquireError::OperationCanceled
+                        | inquire::InquireError::OperationInterrupted,
+                    ) => {
                         std::process::exit(130);
                     }
-                    Err(e) => return Err(routines_core::error::RoutineError::Io(
-                        std::io::Error::other(e.to_string()),
-                    )),
+                    Err(e) => {
+                        return Err(routines_core::error::RoutineError::Io(
+                            std::io::Error::other(e.to_string()),
+                        ));
+                    }
                 }
             }
             InputType::Enum => {
@@ -441,12 +447,17 @@ fn prompt_missing_inputs(
                 }
                 match prompt.prompt() {
                     Ok(v) => Some(v),
-                    Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                    Err(
+                        inquire::InquireError::OperationCanceled
+                        | inquire::InquireError::OperationInterrupted,
+                    ) => {
                         std::process::exit(130);
                     }
-                    Err(e) => return Err(routines_core::error::RoutineError::Io(
-                        std::io::Error::other(e.to_string()),
-                    )),
+                    Err(e) => {
+                        return Err(routines_core::error::RoutineError::Io(
+                            std::io::Error::other(e.to_string()),
+                        ));
+                    }
                 }
             }
             other => {
@@ -463,7 +474,9 @@ fn prompt_missing_inputs(
                             if input.is_empty() || input.parse::<i64>().is_ok() {
                                 Ok(inquire::validator::Validation::Valid)
                             } else {
-                                Ok(inquire::validator::Validation::Invalid("Must be an integer".into()))
+                                Ok(inquire::validator::Validation::Invalid(
+                                    "Must be an integer".into(),
+                                ))
                             }
                         })
                         .prompt(),
@@ -472,7 +485,9 @@ fn prompt_missing_inputs(
                             if input.is_empty() || input.parse::<f64>().is_ok() {
                                 Ok(inquire::validator::Validation::Valid)
                             } else {
-                                Ok(inquire::validator::Validation::Invalid("Must be a number".into()))
+                                Ok(inquire::validator::Validation::Invalid(
+                                    "Must be a number".into(),
+                                ))
                             }
                         })
                         .prompt(),
@@ -490,7 +505,9 @@ fn prompt_missing_inputs(
                             {
                                 Ok(inquire::validator::Validation::Valid)
                             } else {
-                                Ok(inquire::validator::Validation::Invalid("Must be YYYY-MM-DD format".into()))
+                                Ok(inquire::validator::Validation::Invalid(
+                                    "Must be YYYY-MM-DD format".into(),
+                                ))
                             }
                         })
                         .prompt(),
@@ -506,12 +523,17 @@ fn prompt_missing_inputs(
                         });
                     }
                     Ok(v) => Some(v),
-                    Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                    Err(
+                        inquire::InquireError::OperationCanceled
+                        | inquire::InquireError::OperationInterrupted,
+                    ) => {
                         std::process::exit(130);
                     }
-                    Err(e) => return Err(routines_core::error::RoutineError::Io(
-                        std::io::Error::other(e.to_string()),
-                    )),
+                    Err(e) => {
+                        return Err(routines_core::error::RoutineError::Io(
+                            std::io::Error::other(e.to_string()),
+                        ));
+                    }
                 }
             }
         };
@@ -524,7 +546,12 @@ fn prompt_missing_inputs(
     Ok(result)
 }
 
-fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool, verbose: bool) -> routines_core::error::Result<()> {
+fn cmd_run(
+    name: &str,
+    raw_inputs: &[String],
+    quiet: bool,
+    verbose: bool,
+) -> routines_core::error::Result<()> {
     use colored::Colorize;
     use std::io::IsTerminal;
 
@@ -615,8 +642,16 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool, verbose: bool) -> rou
     if is_tty {
         let is_failed = result.status == RunStatus::Failed;
         let total_steps = result.step_results.len();
-        let ok_steps = result.step_results.iter().filter(|s| s.status == StepStatus::Success).count();
-        let total_ms: u64 = result.step_results.iter().map(|s| s.execution_time_ms).sum();
+        let ok_steps = result
+            .step_results
+            .iter()
+            .filter(|s| s.status == StepStatus::Success)
+            .count();
+        let total_ms: u64 = result
+            .step_results
+            .iter()
+            .map(|s| s.execution_time_ms)
+            .sum();
 
         // Show step table only on failure or --verbose
         if verbose || is_failed {
@@ -634,11 +669,7 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool, verbose: bool) -> rou
                     Cell::new(i + 1),
                     Cell::new(&step.step_id),
                     status_cell,
-                    Cell::new(
-                        step.exit_code
-                            .map(|c| c.to_string())
-                            .unwrap_or("-".into()),
-                    ),
+                    Cell::new(step.exit_code.map(|c| c.to_string()).unwrap_or("-".into())),
                     Cell::new(format!("{}ms", step.execution_time_ms)),
                 ]);
             }
@@ -699,17 +730,15 @@ fn cmd_run(name: &str, raw_inputs: &[String], quiet: bool, verbose: bool) -> rou
 }
 
 /// Render output according to format. TTY: comfy-table for table format. Pipe: TSV.
-fn render_output(
-    output: &str,
-    format: &routines_core::parser::OutputFormat,
-    is_tty: bool,
-) {
+fn render_output(output: &str, format: &routines_core::parser::OutputFormat, is_tty: bool) {
     use routines_core::parser::OutputFormat;
 
     match format {
         OutputFormat::Table => {
             // Try to parse as JSON array of objects
-            if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(output) {
+            if let Ok(rows) =
+                serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(output)
+            {
                 if rows.is_empty() {
                     println!("(empty)");
                     return;
@@ -738,7 +767,11 @@ fn render_output(
                     // TSV output
                     println!(
                         "{}",
-                        columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join("\t")
+                        columns
+                            .iter()
+                            .map(|c| c.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\t")
                     );
                     for row in &rows {
                         let cells: Vec<String> = columns
@@ -858,7 +891,10 @@ fn print_truncated(prefix: &str, text: &str, max_lines: usize) {
             } else if i < max_lines {
                 println!("  {line}");
             } else {
-                println!("  ... ({} more lines, use --full to show all)", lines.len() - max_lines);
+                println!(
+                    "  ... ({} more lines, use --full to show all)",
+                    lines.len() - max_lines
+                );
                 break;
             }
         }
@@ -904,14 +940,7 @@ fn cmd_mcp(action: McpAction) -> routines_core::error::Result<()> {
                 })
                 .collect();
             let mut config = McpConfig::load(&rdir)?;
-            config.add(
-                name.clone(),
-                McpServerConfig {
-                    command,
-                    args,
-                    env,
-                },
-            );
+            config.add(name.clone(), McpServerConfig { command, args, env });
             config.save(&rdir)?;
             println!("Added MCP server '{name}'");
         }
@@ -955,10 +984,7 @@ fn cmd_mcp(action: McpAction) -> routines_core::error::Result<()> {
                     println!("OK");
                     println!("Tools ({}):", tools.len());
                     for t in &tools {
-                        let desc = t
-                            .description
-                            .as_deref()
-                            .unwrap_or("");
+                        let desc = t.description.as_deref().unwrap_or("");
                         println!("  {} — {desc}", t.name);
                     }
                 }
@@ -989,8 +1015,7 @@ async fn test_mcp_connection(
         cmd.env(k, v);
     }
 
-    let transport =
-        TokioChildProcess::new(cmd).map_err(|e| format!("Failed to spawn: {e}"))?;
+    let transport = TokioChildProcess::new(cmd).map_err(|e| format!("Failed to spawn: {e}"))?;
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(30), ().serve(transport))
         .await
