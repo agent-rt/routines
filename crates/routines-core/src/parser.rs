@@ -15,15 +15,9 @@ pub struct Routine {
     /// Cleanup steps that always execute after main steps, regardless of success/failure.
     #[serde(default)]
     pub finally: Vec<Step>,
-    /// Output template expression, resolved after all steps complete.
+    /// Output configuration: what to output, how to format it, and rendering details.
     #[serde(default)]
-    pub output: Option<String>,
-    /// Output format hint for CLI rendering.
-    #[serde(default)]
-    pub output_format: OutputFormat,
-    /// Explicit column order and selection for table output.
-    #[serde(default)]
-    pub columns: Option<Vec<String>>,
+    pub output: Option<OutputConfig>,
     /// Secrets injection into CLI subprocess environment variables.
     #[serde(default)]
     pub secrets_env: SecretsEnv,
@@ -100,6 +94,19 @@ impl<'de> serde::Deserialize<'de> for SecretsEnv {
 
         deserializer.deserialize_any(SecretsEnvVisitor)
     }
+}
+
+/// Structured output configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// Template expression resolved after all steps complete.
+    pub value: String,
+    /// Output format: plain (default) or table.
+    #[serde(default)]
+    pub format: OutputFormat,
+    /// Explicit column order and selection (only meaningful for table format).
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
 }
 
 /// Output format for CLI rendering.
@@ -842,7 +849,7 @@ finally:
     }
 
     #[test]
-    fn parse_output_field() {
+    fn parse_output_config() {
         let routine = Routine::from_yaml(
             r#"
 name: with_output
@@ -852,17 +859,19 @@ steps:
     type: cli
     command: echo
     args: ["hello"]
-output: "{{ run.stdout }}"
+output:
+  value: "{{ run.stdout }}"
 "#,
         )
         .unwrap();
 
-        assert_eq!(routine.output.as_deref(), Some("{{ run.stdout }}"));
-        assert_eq!(routine.output_format, OutputFormat::Plain);
+        let cfg = routine.output.unwrap();
+        assert_eq!(cfg.value, "{{ run.stdout }}");
+        assert_eq!(cfg.format, OutputFormat::Plain);
     }
 
     #[test]
-    fn parse_output_format_table() {
+    fn parse_output_config_table() {
         let routine = Routine::from_yaml(
             r#"
 name: with_table
@@ -871,13 +880,17 @@ steps:
   - id: run
     type: cli
     command: echo
-output: "{{ run.stdout }}"
-output_format: table
+output:
+  value: "{{ run.stdout }}"
+  format: table
+  columns: [a, b, c]
 "#,
         )
         .unwrap();
 
-        assert_eq!(routine.output_format, OutputFormat::Table);
+        let cfg = routine.output.unwrap();
+        assert_eq!(cfg.format, OutputFormat::Table);
+        assert_eq!(cfg.columns, Some(vec!["a".into(), "b".into(), "c".into()]));
     }
 
     #[test]
@@ -1000,7 +1013,6 @@ steps:
         .unwrap();
 
         assert!(routine.output.is_none());
-        assert_eq!(routine.output_format, OutputFormat::Plain);
     }
 
     #[test]

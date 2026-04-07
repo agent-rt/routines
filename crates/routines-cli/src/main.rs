@@ -716,12 +716,7 @@ fn cmd_run(
         if let Some(output) = &result.output {
             let trimmed = output.trim();
             if !trimmed.is_empty() {
-                render_output(
-                    trimmed,
-                    &routine.output_format,
-                    true,
-                    routine.columns.as_ref(),
-                );
+                render_output(trimmed, routine.output.as_ref(), true);
             }
         }
 
@@ -735,12 +730,7 @@ fn cmd_run(
         if let Some(output) = &result.output {
             let trimmed = output.trim();
             if !trimmed.is_empty() {
-                render_output(
-                    trimmed,
-                    &routine.output_format,
-                    false,
-                    routine.columns.as_ref(),
-                );
+                render_output(trimmed, routine.output.as_ref(), false);
             }
         }
         if result.status == RunStatus::Failed {
@@ -754,11 +744,15 @@ fn cmd_run(
 /// Render output according to format. TTY: comfy-table for table format. Pipe: TSV.
 fn render_output(
     output: &str,
-    format: &routines_core::parser::OutputFormat,
+    output_config: Option<&routines_core::parser::OutputConfig>,
     is_tty: bool,
-    explicit_columns: Option<&Vec<String>>,
 ) {
     use routines_core::parser::OutputFormat;
+
+    let format = output_config
+        .map(|c| &c.format)
+        .unwrap_or(&OutputFormat::Plain);
+    let explicit_columns = output_config.and_then(|c| c.columns.as_ref());
 
     match format {
         OutputFormat::Table => {

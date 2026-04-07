@@ -290,7 +290,8 @@ steps:
     type: cli
     command: echo
     args: ["Hello {{ inputs.who }}"]
-output: "{{ say_hi.stdout }}"
+output:
+  value: "{{ say_hi.stdout }}"
 "#;
         let test = r#"
 routine: greet
@@ -321,7 +322,8 @@ steps:
     type: cli
     command: echo
     args: ["hi"]
-output: "{{ step1.stdout }}"
+output:
+  value: "{{ step1.stdout }}"
 "#;
         let test = r#"
 routine: greet
@@ -354,7 +356,8 @@ steps:
     select: ".items"
     mapping:
       name: ".name"
-output: "{{ parse.stdout }}"
+output:
+  value: "{{ parse.stdout }}"
 "#;
         let test = r#"
 routine: transform_test
@@ -382,7 +385,8 @@ steps:
     type: cli
     command: echo
     args: ["ok"]
-output: "{{ s1.stdout }}"
+output:
+  value: "{{ s1.stdout }}"
 "#;
         let test = r#"
 routine: simple
@@ -409,7 +413,8 @@ steps:
     type: cli
     command: echo
     args: ["ok"]
-output: "{{ s1.stdout }}"
+output:
+  value: "{{ s1.stdout }}"
 "#;
         let test = r#"
 routine: simple
@@ -441,7 +446,8 @@ steps:
     type: cli
     command: echo
     args: ["2"]
-output: "{{ b.stdout }}"
+output:
+  value: "{{ b.stdout }}"
 "#;
         let test = r#"
 routine: multi
@@ -473,7 +479,8 @@ steps:
     type: cli
     command: echo
     args: ["ok"]
-output: "{{ s1.stdout }}"
+output:
+  value: "{{ s1.stdout }}"
 "#;
         let test = r#"
 routine: simple

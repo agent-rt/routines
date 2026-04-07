@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
 use crate::parser::{
-    BackoffStrategy, InputDef, InputType, OnFail, OutputFormat, Routine, Step, StepAction,
+    BackoffStrategy, InputDef, InputType, OnFail, OutputConfig, Routine, Step, StepAction,
 };
 
 /// Structured diagnostic for Agent-parseable error context.
@@ -77,12 +77,10 @@ pub enum StepStatus {
 pub struct RunResult {
     pub status: RunStatus,
     pub step_results: Vec<StepResult>,
-    /// Resolved output template, if declared in routine.
+    /// Resolved output value and format config.
     pub output: Option<String>,
-    /// Output format hint from routine declaration.
-    pub output_format: OutputFormat,
-    /// Explicit column order/selection for table output.
-    pub columns: Option<Vec<String>>,
+    /// Output configuration from routine declaration (format + columns).
+    pub output_config: Option<OutputConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -854,7 +852,7 @@ fn resolve_output(routine: &Routine, ctx: &Context) -> Option<String> {
     routine
         .output
         .as_ref()
-        .and_then(|template| ctx.resolve(template, "_output").ok())
+        .and_then(|cfg| ctx.resolve(&cfg.value, "_output").ok())
 }
 
 /// Execute finally steps sequentially. Always runs, regardless of main step results.
@@ -963,8 +961,7 @@ fn run_sequential(
                 status: run_status,
                 step_results,
                 output,
-                output_format: routine.output_format.clone(),
-                columns: routine.columns.clone(),
+                output_config: routine.output.clone(),
             });
         }
 
@@ -1011,8 +1008,7 @@ fn run_sequential(
                 status: run_status,
                 step_results,
                 output,
-                output_format: routine.output_format.clone(),
-                columns: routine.columns.clone(),
+                output_config: routine.output.clone(),
             });
         }
 
@@ -1036,8 +1032,7 @@ fn run_sequential(
                     status: run_status,
                     step_results,
                     output,
-                    output_format: routine.output_format.clone(),
-                    columns: routine.columns.clone(),
+                    output_config: routine.output.clone(),
                 });
             }
         }
@@ -1064,8 +1059,7 @@ fn run_sequential(
         status: run_status,
         step_results,
         output,
-        output_format: routine.output_format.clone(),
-        columns: routine.columns.clone(),
+        output_config: routine.output.clone(),
     })
 }
 
@@ -1330,8 +1324,7 @@ fn run_dag(
         status: run_status,
         step_results,
         output,
-        output_format: routine.output_format.clone(),
-        columns: routine.columns.clone(),
+        output_config: routine.output.clone(),
     })
 }
 
@@ -2169,7 +2162,8 @@ steps:
     type: transform
     input: "{{ data.stdout }}"
     select: ".[0:{{ inputs.NUM }}]"
-output: "{{ slice.stdout }}"
+output:
+  value: "{{ slice.stdout }}"
 "#,
         )
         .unwrap();
@@ -2200,7 +2194,8 @@ steps:
     input: "{{ iterate.stdout }}"
     mapping:
       name: ".name"
-output: "{{ format.stdout }}"
+output:
+  value: "{{ format.stdout }}"
 "#,
         )
         .unwrap();
@@ -2495,7 +2490,8 @@ steps:
     type: cli
     command: echo
     args: ["world"]
-output: "Hello {{ greet.stdout }}"
+output:
+  value: "Hello {{ greet.stdout }}"
 "#,
         )
         .unwrap();
@@ -2520,7 +2516,8 @@ steps:
     type: cli
     command: echo
     args: ["bar"]
-output: "{{ a.stdout }}+{{ b.stdout }}"
+output:
+  value: "{{ a.stdout }}+{{ b.stdout }}"
 "#,
         )
         .unwrap();

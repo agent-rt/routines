@@ -155,8 +155,10 @@ Top-level fields:
   inputs: list of InputDef (default: [])
   steps: list of Step (required)
   finally: list of Step (default: []) — cleanup steps, always run after main steps regardless of success/failure
-  output: String (optional) — template expression resolved after all steps, returned as routine result
-  output_format: plain|table (default: plain) — table expects JSON array, renders as table in CLI
+  output: OutputConfig (optional) — structured output configuration
+    value: String (required) — template expression resolved after all steps
+    format: plain|table (default: plain) — table expects JSON array, renders as table
+    columns: list of String (optional) — explicit column order and selection for table format
   audit: full|summary|none (default: summary) — full: log every step; summary: run + failures only; none: no audit
 
 InputDef:
@@ -269,14 +271,17 @@ Example:
 /// Render output for MCP responses. Table format converts JSON array to compact text.
 fn render_output_for_mcp(
     output: &str,
-    format: &crate::parser::OutputFormat,
-    explicit_columns: Option<&Vec<String>>,
+    output_config: Option<&crate::parser::OutputConfig>,
 ) -> String {
     use crate::parser::OutputFormat;
 
-    if *format != OutputFormat::Table {
+    let Some(cfg) = output_config else {
+        return output.to_string();
+    };
+    if cfg.format != OutputFormat::Table {
         return output.to_string();
     }
+    let explicit_columns = cfg.columns.as_ref();
 
     // Try to parse as JSON array of objects
     let Ok(rows) = serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(output)
@@ -926,8 +931,6 @@ impl RoutinesMcpServer {
                         strict_mode: false,
                         finally: Vec::new(),
                         output: None,
-                        output_format: crate::parser::OutputFormat::default(),
-                        columns: None,
                         secrets_env: crate::parser::SecretsEnv::None,
                         routine_timeout: None,
                         audit: crate::parser::AuditLevel::None,
@@ -1526,10 +1529,13 @@ impl RoutinesMcpServer {
         }
 
         // Show output declaration
-        if let Some(output_template) = &routine.output {
-            let _ = writeln!(out, "\nOutput: {output_template}");
-            if routine.output_format != crate::parser::OutputFormat::Plain {
-                let _ = writeln!(out, "Format: {:?}", routine.output_format);
+        if let Some(output_cfg) = &routine.output {
+            let _ = writeln!(out, "\nOutput: {}", output_cfg.value);
+            if output_cfg.format != crate::parser::OutputFormat::Plain {
+                let _ = writeln!(out, "Format: {:?}", output_cfg.format);
+            }
+            if let Some(cols) = &output_cfg.columns {
+                let _ = writeln!(out, "Columns: {}", cols.join(", "));
             }
         }
 
@@ -1633,11 +1639,8 @@ impl RoutinesMcpServer {
                 if let Some(output) = &result.output {
                     let trimmed = output.trim();
                     if !trimmed.is_empty() {
-                        let rendered = render_output_for_mcp(
-                            trimmed,
-                            &result.output_format,
-                            result.columns.as_ref(),
-                        );
+                        let rendered =
+                            render_output_for_mcp(trimmed, result.output_config.as_ref());
                         let _ = write!(out, "\n---\n");
                         if rendered.len() > 2000 {
                             let _ = write!(out, "{}... (truncated)", &rendered[..2000]);
