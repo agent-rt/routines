@@ -641,7 +641,15 @@ fn cmd_run(
 
     if is_tty {
         let is_failed = result.status == RunStatus::Failed;
-        let total_steps = result.step_results.len();
+        let total_executions = result.step_results.len();
+        let logical_steps = {
+            let mut seen = std::collections::HashSet::new();
+            for s in &result.step_results {
+                let base = s.step_id.split('[').next().unwrap_or(&s.step_id);
+                seen.insert(base);
+            }
+            seen.len()
+        };
         let ok_steps = result
             .step_results
             .iter()
@@ -690,12 +698,16 @@ fn cmd_run(
             } else {
                 format!("{total_ms}ms")
             };
+            let steps_str = if total_executions > logical_steps {
+                format!("{ok_steps}/{logical_steps} steps ({total_executions} executions)")
+            } else {
+                format!("{ok_steps}/{logical_steps} steps")
+            };
             eprintln!(
-                "{} {} {}/{} steps {}",
+                "{} {} {} {}",
                 "✓".green().bold(),
                 routine.name.bold(),
-                ok_steps,
-                total_steps,
+                steps_str,
                 time_str.dimmed(),
             );
         }
@@ -704,7 +716,12 @@ fn cmd_run(
         if let Some(output) = &result.output {
             let trimmed = output.trim();
             if !trimmed.is_empty() {
-                render_output(trimmed, &routine.output_format, true);
+                render_output(
+                    trimmed,
+                    &routine.output_format,
+                    true,
+                    routine.columns.as_ref(),
+                );
             }
         }
 
@@ -718,7 +735,12 @@ fn cmd_run(
         if let Some(output) = &result.output {
             let trimmed = output.trim();
             if !trimmed.is_empty() {
-                render_output(trimmed, &routine.output_format, false);
+                render_output(
+                    trimmed,
+                    &routine.output_format,
+                    false,
+                    routine.columns.as_ref(),
+                );
             }
         }
         if result.status == RunStatus::Failed {
@@ -730,7 +752,12 @@ fn cmd_run(
 }
 
 /// Render output according to format. TTY: comfy-table for table format. Pipe: TSV.
-fn render_output(output: &str, format: &routines_core::parser::OutputFormat, is_tty: bool) {
+fn render_output(
+    output: &str,
+    format: &routines_core::parser::OutputFormat,
+    is_tty: bool,
+    explicit_columns: Option<&Vec<String>>,
+) {
     use routines_core::parser::OutputFormat;
 
     match format {
@@ -743,8 +770,14 @@ fn render_output(output: &str, format: &routines_core::parser::OutputFormat, is_
                     println!("(empty)");
                     return;
                 }
-                // Collect column names from first row
-                let columns: Vec<&String> = rows[0].keys().collect();
+                // Use explicit columns if provided, otherwise infer from first row
+                let inferred: Vec<&String>;
+                let columns: Vec<&String> = if let Some(cols) = explicit_columns {
+                    cols.iter().collect()
+                } else {
+                    inferred = rows[0].keys().collect();
+                    inferred
+                };
 
                 if is_tty {
                     let mut table = comfy_table::Table::new();

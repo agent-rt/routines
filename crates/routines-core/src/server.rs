@@ -65,7 +65,7 @@ pub struct RunRoutineParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MetaParams {
-    /// Action: guide, schema, get, create, validate, dry_run, test, history, log, run_step, explore, solidify
+    /// Action: guide, schema, get, create, update, validate, dry_run, test, history, log, run_step, explore, solidify
     pub action: String,
     /// Routine name (for get/create/history/run_step/explore) or run_id (for log)
     #[serde(default)]
@@ -267,7 +267,11 @@ Example:
 ";
 
 /// Render output for MCP responses. Table format converts JSON array to compact text.
-fn render_output_for_mcp(output: &str, format: &crate::parser::OutputFormat) -> String {
+fn render_output_for_mcp(
+    output: &str,
+    format: &crate::parser::OutputFormat,
+    explicit_columns: Option<&Vec<String>>,
+) -> String {
     use crate::parser::OutputFormat;
 
     if *format != OutputFormat::Table {
@@ -284,7 +288,13 @@ fn render_output_for_mcp(output: &str, format: &crate::parser::OutputFormat) -> 
         return "(empty)".to_string();
     }
 
-    let columns: Vec<&String> = rows[0].keys().collect();
+    let inferred: Vec<&String>;
+    let columns: Vec<&String> = if let Some(cols) = explicit_columns {
+        cols.iter().collect()
+    } else {
+        inferred = rows[0].keys().collect();
+        inferred
+    };
     let mut lines = Vec::with_capacity(rows.len() + 1);
 
     // Header
@@ -310,6 +320,52 @@ fn render_output_for_mcp(output: &str, format: &crate::parser::OutputFormat) -> 
     }
 
     lines.join("\n")
+}
+
+/// Enhanced validation: check template refs, brace matching, for_each warnings.
+/// Returns (warnings, errors).
+fn enhanced_validate(routine: &Routine) -> (Vec<String>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    let step_ids: std::collections::HashSet<&str> =
+        routine.steps.iter().map(|s| s.id.as_str()).collect();
+
+    for step in &routine.steps {
+        let templates = collect_step_templates(step);
+        for tmpl in &templates {
+            for cap in find_step_refs(tmpl) {
+                if !step_ids.contains(cap.as_str())
+                    && cap != "inputs"
+                    && cap != "secrets"
+                    && cap != "item"
+                    && cap != "item_index"
+                    && cap != "_run"
+                {
+                    errors.push(format!(
+                        "step '{}': references undefined step '{cap}'",
+                        step.id,
+                    ));
+                }
+            }
+            let open = tmpl.matches("{{").count();
+            let close = tmpl.matches("}}").count();
+            if open != close {
+                errors.push(format!(
+                    "step '{}': mismatched template braces ({{ {open} vs }} {close})",
+                    step.id,
+                ));
+            }
+        }
+
+        if step.for_each.is_some() {
+            warnings.push(format!(
+                "step '{}': for_each — downstream '{{{{ {}.stdout }}}}' is a JSON array",
+                step.id, step.id,
+            ));
+        }
+    }
+
+    (warnings, errors)
 }
 
 fn err_internal(msg: String) -> ErrorData {
@@ -370,11 +426,7 @@ fn collect_step_templates(step: &crate::parser::Step) -> Vec<String> {
                 templates.push(t.clone());
             }
         }
-        StepAction::Write {
-            path,
-            content,
-            ..
-        } => {
+        StepAction::Write { path, content, .. } => {
             templates.push(path.clone());
             templates.push(content.clone());
         }
@@ -650,8 +702,19 @@ impl RoutinesMcpServer {
                 let yaml_content = params
                     .yaml_content
                     .ok_or_else(|| err_params("'yaml_content' required for create".into()))?;
-                let _routine = Routine::from_yaml(&yaml_content)
+                let routine = Routine::from_yaml(&yaml_content)
                     .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
+                let (warnings, errors) = enhanced_validate(&routine);
+                if !errors.is_empty() {
+                    return Err(err_params(format!(
+                        "Validation errors:\n{}",
+                        errors
+                            .iter()
+                            .map(|e| format!("  - {e}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )));
+                }
                 let file_path = resolve_routine_path(&name, &routines_dir());
                 if let Some(parent) = file_path.parent() {
                     std::fs::create_dir_all(parent)
@@ -659,7 +722,52 @@ impl RoutinesMcpServer {
                 }
                 std::fs::write(&file_path, &yaml_content)
                     .map_err(|e| err_internal(format!("Failed to write file: {e}")))?;
-                return text_ok(format!("created {name} → {}", file_path.display()));
+                let mut msg = format!("created {name} → {}", file_path.display());
+                if !warnings.is_empty() {
+                    msg.push_str("\nWarnings:");
+                    for w in &warnings {
+                        msg.push_str(&format!("\n  - {w}"));
+                    }
+                }
+                return text_ok(msg);
+            }
+            "update" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' required for update".into()))?;
+                let yaml_content = params
+                    .yaml_content
+                    .ok_or_else(|| err_params("'yaml_content' required for update".into()))?;
+                let file_path = resolve_routine_path(&name, &routines_dir());
+                if !file_path.exists() {
+                    return Err(err_params(format!(
+                        "Routine '{name}' not found at {}. Use 'create' for new routines.",
+                        file_path.display()
+                    )));
+                }
+                let routine = Routine::from_yaml(&yaml_content)
+                    .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
+                let (warnings, errors) = enhanced_validate(&routine);
+                if !errors.is_empty() {
+                    return Err(err_params(format!(
+                        "Validation errors:\n{}",
+                        errors
+                            .iter()
+                            .map(|e| format!("  - {e}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )));
+                }
+                std::fs::write(&file_path, &yaml_content)
+                    .map_err(|e| err_internal(format!("Failed to write file: {e}")))?;
+                let mut msg = format!("updated {name} → {}", file_path.display());
+                if !warnings.is_empty() {
+                    msg.push_str("\nWarnings:");
+                    for w in &warnings {
+                        msg.push_str(&format!("\n  - {w}"));
+                    }
+                }
+                return text_ok(msg);
             }
             "validate" => {
                 let yaml_content = params
@@ -670,49 +778,7 @@ impl RoutinesMcpServer {
                     Err(e) => return Err(err_params(format!("Invalid YAML: {e}"))),
                 };
 
-                let mut warnings: Vec<String> = Vec::new();
-                let mut errors: Vec<String> = Vec::new();
-                let step_ids: std::collections::HashSet<&str> =
-                    routine.steps.iter().map(|s| s.id.as_str()).collect();
-
-                for step in &routine.steps {
-                    // Check template references to step IDs
-                    let templates = collect_step_templates(step);
-                    for tmpl in &templates {
-                        // Find all {{ step_id.xxx }} references
-                        for cap in find_step_refs(tmpl) {
-                            if !step_ids.contains(cap.as_str())
-                                && cap != "inputs"
-                                && cap != "secrets"
-                                && cap != "item"
-                                && cap != "item_index"
-                                && cap != "_run"
-                            {
-                                errors.push(format!(
-                                    "step '{}': references undefined step '{cap}'",
-                                    step.id,
-                                ));
-                            }
-                        }
-                        // Check for unclosed template braces
-                        let open = tmpl.matches("{{").count();
-                        let close = tmpl.matches("}}").count();
-                        if open != close {
-                            errors.push(format!(
-                                "step '{}': mismatched template braces ({{ {open} vs }} {close})",
-                                step.id,
-                            ));
-                        }
-                    }
-
-                    // Warn about for_each downstream usage
-                    if step.for_each.is_some() {
-                        warnings.push(format!(
-                            "step '{}': for_each — downstream '{{{{ {}.stdout }}}}' is a JSON array",
-                            step.id, step.id,
-                        ));
-                    }
-                }
+                let (warnings, errors) = enhanced_validate(&routine);
 
                 let strict = if routine.strict_mode { "on" } else { "off" };
                 let mut out = format!(
@@ -861,6 +927,7 @@ impl RoutinesMcpServer {
                         finally: Vec::new(),
                         output: None,
                         output_format: crate::parser::OutputFormat::default(),
+                        columns: None,
                         secrets_env: crate::parser::SecretsEnv::None,
                         routine_timeout: None,
                         audit: crate::parser::AuditLevel::None,
@@ -1113,7 +1180,7 @@ impl RoutinesMcpServer {
             }
             other => {
                 return Err(err_params(format!(
-                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run, test, history, log, run_step, explore, solidify"
+                    "Unknown action '{other}'. Use: schema, get, create, update, validate, dry_run, test, history, log, run_step, explore, solidify"
                 )));
             }
         }
@@ -1313,11 +1380,20 @@ impl RoutinesMcpServer {
                         }
                     }
                 }
-                StepAction::Write { path, content, mode } => {
+                StepAction::Write {
+                    path,
+                    content,
+                    mode,
+                } => {
                     let resolved_path = ctx
                         .resolve(path, &step.id)
                         .unwrap_or_else(|e| format!("<error: {e}>"));
-                    let _ = writeln!(out, "[{}] {}: write → {resolved_path} ({mode:?})", i + 1, step.id);
+                    let _ = writeln!(
+                        out,
+                        "[{}] {}: write → {resolved_path} ({mode:?})",
+                        i + 1,
+                        step.id
+                    );
                     let preview = if content.len() > 80 {
                         format!("{}...", &content[..80])
                     } else {
@@ -1533,21 +1609,35 @@ impl RoutinesMcpServer {
             .iter()
             .map(|s| s.execution_time_ms)
             .sum();
-        let total_steps = result.step_results.len();
+        let total_executions = result.step_results.len();
+        let logical_steps = {
+            let mut seen = std::collections::HashSet::new();
+            for s in &result.step_results {
+                let base = s.step_id.split('[').next().unwrap_or(&s.step_id);
+                seen.insert(base);
+            }
+            seen.len()
+        };
 
         let mut out = String::new();
 
         match result.status {
             RunStatus::Success => {
                 // Compact: one-line summary + output
-                let _ = write!(
-                    out,
-                    "run={short_id} SUCCESS {total_ms}ms {total_steps}/{total_steps} steps"
-                );
+                let steps_str = if total_executions > logical_steps {
+                    format!("{logical_steps}/{logical_steps} steps ({total_executions} executions)")
+                } else {
+                    format!("{logical_steps}/{logical_steps} steps")
+                };
+                let _ = write!(out, "run={short_id} SUCCESS {total_ms}ms {steps_str}");
                 if let Some(output) = &result.output {
                     let trimmed = output.trim();
                     if !trimmed.is_empty() {
-                        let rendered = render_output_for_mcp(trimmed, &result.output_format);
+                        let rendered = render_output_for_mcp(
+                            trimmed,
+                            &result.output_format,
+                            result.columns.as_ref(),
+                        );
                         let _ = write!(out, "\n---\n");
                         if rendered.len() > 2000 {
                             let _ = write!(out, "{}... (truncated)", &rendered[..2000]);
@@ -1567,7 +1657,7 @@ impl RoutinesMcpServer {
                     .unwrap_or(0);
                 let _ = writeln!(
                     out,
-                    "run={short_id} FAILED at step {failed_at}/{total_steps}"
+                    "run={short_id} FAILED at step {failed_at}/{logical_steps}"
                 );
                 for step in &result.step_results {
                     let icon = match step.status {

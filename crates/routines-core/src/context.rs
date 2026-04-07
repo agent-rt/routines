@@ -199,14 +199,12 @@ impl Context {
                     }
                     s if s.starts_with("headers.") => {
                         let header_name = &s["headers.".len()..];
-                        output
-                            .headers
-                            .get(header_name)
-                            .cloned()
-                            .ok_or_else(|| RoutineError::UndefinedVariable {
+                        output.headers.get(header_name).cloned().ok_or_else(|| {
+                            RoutineError::UndefinedVariable {
                                 step_id: current_step_id.to_string(),
                                 key: key.to_string(),
-                            })
+                            }
+                        })
                     }
                     _ => Err(RoutineError::UndefinedVariable {
                         step_id: current_step_id.to_string(),

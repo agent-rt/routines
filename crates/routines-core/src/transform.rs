@@ -28,8 +28,18 @@ pub fn apply(
     match &selected {
         Value::Array(arr) => {
             let mut results = Vec::with_capacity(arr.len());
-            for item in arr {
-                results.push(apply_mapping(item, mapping)?);
+            for (index, item) in arr.iter().enumerate() {
+                // Inject synthetic .item_index for positional access in mappings
+                let item_with_index = if let Value::Object(mut map) = item.clone() {
+                    map.insert(
+                        "item_index".to_string(),
+                        Value::Number(serde_json::Number::from(index)),
+                    );
+                    Value::Object(map)
+                } else {
+                    item.clone()
+                };
+                results.push(apply_mapping(&item_with_index, mapping)?);
             }
             Ok(Value::Array(results))
         }
@@ -407,7 +417,12 @@ fn apply_filter(value: &Value, filter: &str) -> Result<Value> {
             })?;
             let current = value_to_f64(value)?;
             let result = eval_math(expr, current)?;
-            Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+            // Preserve integer type when result has no fractional part
+            if result.fract() == 0.0 && result >= i64::MIN as f64 && result <= i64::MAX as f64 {
+                Ok(Value::Number(serde_json::Number::from(result as i64)))
+            } else {
+                Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+            }
         }
         "round" => {
             let n = value_to_f64(value)?;
@@ -1087,7 +1102,11 @@ mod tests {
     #[test]
     fn template_nested_fields() {
         let input = json(r#"{"pr": {"title": "Fix bug", "additions": 10, "deletions": 3}}"#);
-        let result = apply_template(&input, "{{ .pr.title }} (+{{ .pr.additions }}/-{{ .pr.deletions }})").unwrap();
+        let result = apply_template(
+            &input,
+            "{{ .pr.title }} (+{{ .pr.additions }}/-{{ .pr.deletions }})",
+        )
+        .unwrap();
         assert_eq!(result, "Fix bug (+10/-3)");
     }
 

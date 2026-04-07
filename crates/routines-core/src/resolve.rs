@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 /// - `namespace/name` → `hub/<namespace>/<name>.yml`
 /// - `name` → `hub/<name>.yml` (backward compatible)
 pub fn resolve_routine_path(name: &str, routines_dir: &Path) -> PathBuf {
+    // Normalize colon separator to slash: "bilibili:hot" → "bilibili/hot"
+    let name = if !name.starts_with('@') {
+        std::borrow::Cow::Owned(name.replacen(':', "/", 1))
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    };
     if let Some(rest) = name.strip_prefix('@') {
         // Remote registry: @registry/path
         routines_dir.join("registries").join(format!("{rest}.yml"))
@@ -44,6 +50,15 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from("/home/user/.routines/hub/deploy/aws/ecs.yml")
+        );
+    }
+
+    #[test]
+    fn resolve_colon_separator() {
+        let path = resolve_routine_path("bilibili:hot", Path::new("/home/user/.routines"));
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/.routines/hub/bilibili/hot.yml")
         );
     }
 

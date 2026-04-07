@@ -27,9 +27,7 @@ pub(super) fn execute(
     // Strict mode: block sensitive paths
     if strict_mode {
         let path = Path::new(&resolved_path);
-        let canonical = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let path_str = canonical.to_string_lossy();
 
         for prefix in SENSITIVE_PREFIXES {

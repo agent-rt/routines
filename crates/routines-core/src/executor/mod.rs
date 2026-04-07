@@ -81,6 +81,8 @@ pub struct RunResult {
     pub output: Option<String>,
     /// Output format hint from routine declaration.
     pub output_format: OutputFormat,
+    /// Explicit column order/selection for table output.
+    pub columns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -440,14 +442,7 @@ fn execute_step(
             path,
             content,
             mode,
-        } => write::execute(
-            &step.id,
-            path,
-            content,
-            mode,
-            routine.strict_mode,
-            ctx,
-        ),
+        } => write::execute(&step.id, path, content, mode, routine.strict_mode, ctx),
         StepAction::Transform {
             input,
             select,
@@ -969,6 +964,7 @@ fn run_sequential(
                 step_results,
                 output,
                 output_format: routine.output_format.clone(),
+                columns: routine.columns.clone(),
             });
         }
 
@@ -1016,6 +1012,7 @@ fn run_sequential(
                 step_results,
                 output,
                 output_format: routine.output_format.clone(),
+                columns: routine.columns.clone(),
             });
         }
 
@@ -1040,6 +1037,7 @@ fn run_sequential(
                     step_results,
                     output,
                     output_format: routine.output_format.clone(),
+                    columns: routine.columns.clone(),
                 });
             }
         }
@@ -1067,6 +1065,7 @@ fn run_sequential(
         step_results,
         output,
         output_format: routine.output_format.clone(),
+        columns: routine.columns.clone(),
     })
 }
 
@@ -1332,6 +1331,7 @@ fn run_dag(
         step_results,
         output,
         output_format: routine.output_format.clone(),
+        columns: routine.columns.clone(),
     })
 }
 

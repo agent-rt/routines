@@ -21,6 +21,9 @@ pub struct Routine {
     /// Output format hint for CLI rendering.
     #[serde(default)]
     pub output_format: OutputFormat,
+    /// Explicit column order and selection for table output.
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
     /// Secrets injection into CLI subprocess environment variables.
     #[serde(default)]
     pub secrets_env: SecretsEnv,
