@@ -194,16 +194,31 @@ fn cmd_list() -> routines_core::error::Result<()> {
 
     if hub_dir.exists() {
         let entries = routines_core::server::collect_routines_recursive(&hub_dir, "");
-        for (ref_name, routine) in &entries {
-            let inputs_desc = format_inputs_cli(&routine.inputs, &mut has_required);
-            if is_tty {
-                println!(
-                    "{:<20} — {}{inputs_desc}",
-                    ref_name.bold(),
-                    routine.description
-                );
-            } else {
-                println!("{ref_name} — {}{inputs_desc}", routine.description);
+        for entry in &entries {
+            match entry {
+                routines_core::server::RoutineEntry::Ok(ref_name, routine) => {
+                    let inputs_desc = format_inputs_cli(&routine.inputs, &mut has_required);
+                    if is_tty {
+                        println!(
+                            "{:<20} — {}{inputs_desc}",
+                            ref_name.bold(),
+                            routine.description
+                        );
+                    } else {
+                        println!("{ref_name} — {}{inputs_desc}", routine.description);
+                    }
+                }
+                routines_core::server::RoutineEntry::Err(ref_name, err) => {
+                    if is_tty {
+                        println!(
+                            "{:<20} — {}",
+                            ref_name.bold(),
+                            format!("[PARSE ERROR] {err}").red()
+                        );
+                    } else {
+                        println!("{ref_name} — [PARSE ERROR] {err}");
+                    }
+                }
             }
             has_output = true;
         }
@@ -221,17 +236,33 @@ fn cmd_list() -> routines_core::error::Result<()> {
                 if !entries.is_empty() && has_output {
                     println!();
                 }
-                for (name, routine) in &entries {
-                    let inputs_desc = format_inputs_cli(&routine.inputs, &mut has_required);
-                    let full_name = format!("@{reg_name}/{name}");
-                    if is_tty {
-                        println!(
-                            "{:<20} — {}{inputs_desc}",
-                            full_name.bold(),
-                            routine.description
-                        );
-                    } else {
-                        println!("{full_name} — {}{inputs_desc}", routine.description);
+                for entry in &entries {
+                    match entry {
+                        routines_core::server::RoutineEntry::Ok(name, routine) => {
+                            let inputs_desc = format_inputs_cli(&routine.inputs, &mut has_required);
+                            let full_name = format!("@{reg_name}/{name}");
+                            if is_tty {
+                                println!(
+                                    "{:<20} — {}{inputs_desc}",
+                                    full_name.bold(),
+                                    routine.description
+                                );
+                            } else {
+                                println!("{full_name} — {}{inputs_desc}", routine.description);
+                            }
+                        }
+                        routines_core::server::RoutineEntry::Err(name, err) => {
+                            let full_name = format!("@{reg_name}/{name}");
+                            if is_tty {
+                                println!(
+                                    "{:<20} — {}",
+                                    full_name.bold(),
+                                    format!("[PARSE ERROR] {err}").red()
+                                );
+                            } else {
+                                println!("{full_name} — [PARSE ERROR] {err}");
+                            }
+                        }
                     }
                     has_output = true;
                 }

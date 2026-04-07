@@ -775,7 +775,13 @@ fn find_template_vars(text: &str) -> Vec<String> {
 
 /// Recursively collect routine YAML files under a directory.
 /// Returns (relative_name, Routine) pairs sorted by name.
-pub fn collect_routines_recursive(dir: &std::path::Path, prefix: &str) -> Vec<(String, Routine)> {
+/// Either a successfully parsed routine or a parse error with the ref name.
+pub enum RoutineEntry {
+    Ok(String, Routine),
+    Err(String, String), // (ref_name, error_message)
+}
+
+pub fn collect_routines_recursive(dir: &std::path::Path, prefix: &str) -> Vec<RoutineEntry> {
     let mut results = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return results;
@@ -797,7 +803,6 @@ pub fn collect_routines_recursive(dir: &std::path::Path, prefix: &str) -> Vec<(S
         } else if path
             .extension()
             .is_some_and(|ext| ext == "yml" || ext == "yaml")
-            && let Ok(routine) = Routine::from_file(&path)
         {
             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
             let ref_name = if prefix.is_empty() {
@@ -805,10 +810,17 @@ pub fn collect_routines_recursive(dir: &std::path::Path, prefix: &str) -> Vec<(S
             } else {
                 format!("{prefix}/{stem}")
             };
-            results.push((ref_name, routine));
+            match Routine::from_file(&path) {
+                Ok(routine) => results.push(RoutineEntry::Ok(ref_name, routine)),
+                Err(e) => results.push(RoutineEntry::Err(ref_name, format!("{e}"))),
+            }
         }
     }
-    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results.sort_by(|a, b| {
+        let name_a = match a { RoutineEntry::Ok(n, _) | RoutineEntry::Err(n, _) => n };
+        let name_b = match b { RoutineEntry::Ok(n, _) | RoutineEntry::Err(n, _) => n };
+        name_a.cmp(name_b)
+    });
     results
 }
 
@@ -856,9 +868,16 @@ impl RoutinesMcpServer {
         let hub_dir = rdir.join("hub");
         if hub_dir.exists() {
             let entries = collect_routines_recursive(&hub_dir, "");
-            for (ref_name, routine) in &entries {
-                let inputs_desc = format_inputs(&routine.inputs, &mut has_required);
-                let _ = writeln!(out, "{ref_name} — {}{inputs_desc}", routine.description);
+            for entry in &entries {
+                match entry {
+                    RoutineEntry::Ok(ref_name, routine) => {
+                        let inputs_desc = format_inputs(&routine.inputs, &mut has_required);
+                        let _ = writeln!(out, "{ref_name} — {}{inputs_desc}", routine.description);
+                    }
+                    RoutineEntry::Err(ref_name, err) => {
+                        let _ = writeln!(out, "{ref_name} — [PARSE ERROR] {err}");
+                    }
+                }
             }
         }
 
@@ -874,13 +893,20 @@ impl RoutinesMcpServer {
                     if !entries.is_empty() && !out.is_empty() {
                         let _ = writeln!(out);
                     }
-                    for (name, routine) in &entries {
-                        let inputs_desc = format_inputs(&routine.inputs, &mut has_required);
-                        let _ = writeln!(
-                            out,
-                            "@{reg_name}/{name} — {}{inputs_desc}",
-                            routine.description
-                        );
+                    for entry in &entries {
+                        match entry {
+                            RoutineEntry::Ok(name, routine) => {
+                                let inputs_desc = format_inputs(&routine.inputs, &mut has_required);
+                                let _ = writeln!(
+                                    out,
+                                    "@{reg_name}/{name} — {}{inputs_desc}",
+                                    routine.description
+                                );
+                            }
+                            RoutineEntry::Err(name, err) => {
+                                let _ = writeln!(out, "@{reg_name}/{name} — [PARSE ERROR] {err}");
+                            }
+                        }
                     }
                 }
             }
