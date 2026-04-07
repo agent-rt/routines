@@ -166,6 +166,12 @@ Step (type: mcp):
   tool: String (required) — tool name to call on the server
   arguments: map of String→JSON (default: {}) — tool arguments, string values support templates
 
+Step (type: write):
+  path: String (required) — file path to write to, supports templates
+  content: String (required) — content to write, supports templates
+  mode: overwrite|append (default: overwrite)
+  stdout returns the written file path. strict_mode blocks sensitive paths (/etc, ~/.ssh, etc.)
+
 Step (type: transform):
   input: String (required) — template resolving to JSON string
   select: String (optional) — JSON path to extract (e.g. '.data.items'). Array → mapping per element
@@ -176,8 +182,16 @@ Step (type: transform):
   Filter pipeline (use | to chain):
     Type: to_int, to_float, to_string
     String: slice(start, end), split(sep), join(sep), replace(old, new), trim
+    Array: flatten — unwrap one level of nesting, take(N) — first N elements
     Math: math(expr) — use _ for current value (e.g. math(_ / 60)), round, floor, ceil
+    Int math: ceil_div(N) — ceiling division, range — generate [1..n] sequence
     Format: duration_fmt — minutes→'Xh Ym', default(value), fmt(template) — {} placeholder
+    Null safety: to_int->0, to_float->0.0, to_string->empty, other filters->null propagation
+
+  template: String (optional, mutually exclusive with mapping)
+    Multi-field string interpolation: {{ .field | filter }} placeholders replaced from input JSON.
+    Output is plain text, not JSON. Supports \\n for newlines.
+    Example: template: '# {{ .title }}\\n\\n+{{ .additions }}/-{{ .deletions }}'
 
   Example:
     - id: format
@@ -305,6 +319,7 @@ fn collect_step_templates(step: &crate::parser::Step) -> Vec<String> {
             input,
             select,
             mapping,
+            template,
         } => {
             templates.push(input.clone());
             if let Some(s) = select {
@@ -313,6 +328,17 @@ fn collect_step_templates(step: &crate::parser::Step) -> Vec<String> {
             if let Some(m) = mapping {
                 templates.extend(m.values().cloned());
             }
+            if let Some(t) = template {
+                templates.push(t.clone());
+            }
+        }
+        StepAction::Write {
+            path,
+            content,
+            ..
+        } => {
+            templates.push(path.clone());
+            templates.push(content.clone());
         }
         StepAction::Routine { name, inputs } => {
             templates.push(name.clone());
@@ -392,10 +418,15 @@ fn generate_routine_yaml(session: &ExploreSession) -> String {
 
     let _ = writeln!(yaml, "steps:");
     for es in &session.steps {
-        // Indent each line of step YAML by 2 spaces
-        let _ = writeln!(yaml, "  # --- step: {} ---", es.step_id);
+        // YAML list: first line gets `- ` prefix, rest get `  ` alignment (4-space total indent)
+        let mut first = true;
         for line in es.step_yaml.lines() {
-            let _ = writeln!(yaml, "  {line}");
+            if first {
+                let _ = writeln!(yaml, "  - {line}");
+                first = false;
+            } else {
+                let _ = writeln!(yaml, "    {line}");
+            }
         }
     }
 
@@ -1217,6 +1248,7 @@ impl RoutinesMcpServer {
                     input,
                     select,
                     mapping,
+                    ..
                 } => {
                     let resolved_input = ctx
                         .resolve(input, &step.id)
@@ -1236,6 +1268,18 @@ impl RoutinesMcpServer {
                             let _ = writeln!(out, "    {k}: {v}");
                         }
                     }
+                }
+                StepAction::Write { path, content, mode } => {
+                    let resolved_path = ctx
+                        .resolve(path, &step.id)
+                        .unwrap_or_else(|e| format!("<error: {e}>"));
+                    let _ = writeln!(out, "[{}] {}: write → {resolved_path} ({mode:?})", i + 1, step.id);
+                    let preview = if content.len() > 80 {
+                        format!("{}...", &content[..80])
+                    } else {
+                        content.clone()
+                    };
+                    let _ = writeln!(out, "    content: {preview}");
                 }
             }
 
@@ -1350,6 +1394,9 @@ impl RoutinesMcpServer {
                             );
                         }
                         let _ = writeln!(out);
+                    }
+                    StepAction::Write { path, .. } => {
+                        let _ = writeln!(out, "  [F{}] {}: write → {path}", i + 1, step.id);
                     }
                 }
                 if let Some(when_expr) = &step.when {

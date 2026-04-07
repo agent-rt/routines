@@ -47,6 +47,50 @@ fn apply_mapping(value: &Value, mapping: &IndexMap<String, String>) -> Result<Va
     Ok(Value::Object(obj))
 }
 
+/// Public wrapper for evaluate_expr (used by executor for template mode).
+pub fn evaluate_expr_pub(value: &Value, expr: &str) -> Result<Value> {
+    evaluate_expr(value, expr)
+}
+
+/// Public wrapper for navigate (used by executor for template mode).
+pub fn navigate_pub(value: &Value, path: &str) -> Result<Value> {
+    navigate(value, path)
+}
+
+/// Apply a multi-field template to a JSON value, replacing `{{ .path | filter }}` placeholders.
+/// Returns a plain text string (not JSON).
+pub fn apply_template(input: &Value, template: &str) -> Result<String> {
+    let mut result = String::new();
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        // Text before the placeholder
+        result.push_str(&rest[..start]);
+        rest = &rest[start + 2..];
+
+        if let Some(end) = rest.find("}}") {
+            let expr = rest[..end].trim();
+            let value = evaluate_expr(input, expr)?;
+            // Render value as plain text (not JSON-quoted)
+            match &value {
+                Value::String(s) => result.push_str(s),
+                Value::Null => {}
+                other => result.push_str(&other.to_string()),
+            }
+            rest = &rest[end + 2..];
+        } else {
+            // No closing }}, output literally
+            result.push_str("{{");
+        }
+    }
+    result.push_str(rest);
+
+    // Handle escape sequences
+    let result = result.replace("\\n", "\n").replace("\\t", "\t");
+
+    Ok(result)
+}
+
 /// Navigate a JSON value by a dot-path like `.data.items[0].name`.
 /// Handles `[*]` wildcard: applies remaining path to each array element.
 fn navigate(value: &Value, path: &str) -> Result<Value> {
@@ -1023,5 +1067,49 @@ mod tests {
         let input = json(r#"[10, 20, 30, 40, 50]"#);
         let result = apply(&input, Some(".[-2:]"), None).unwrap();
         assert_eq!(result, json("[40, 50]"));
+    }
+
+    // Template tests
+    #[test]
+    fn template_simple_fields() {
+        let input = json(r#"{"title": "Hello", "body": "World"}"#);
+        let result = apply_template(&input, "# {{ .title }}\n\n{{ .body }}").unwrap();
+        assert_eq!(result, "# Hello\n\nWorld");
+    }
+
+    #[test]
+    fn template_with_filters() {
+        let input = json(r#"{"name": "test", "count": "42"}"#);
+        let result = apply_template(&input, "{{ .name }}: {{ .count | to_int }}").unwrap();
+        assert_eq!(result, "test: 42");
+    }
+
+    #[test]
+    fn template_nested_fields() {
+        let input = json(r#"{"pr": {"title": "Fix bug", "additions": 10, "deletions": 3}}"#);
+        let result = apply_template(&input, "{{ .pr.title }} (+{{ .pr.additions }}/-{{ .pr.deletions }})").unwrap();
+        assert_eq!(result, "Fix bug (+10/-3)");
+    }
+
+    #[test]
+    fn template_null_field_renders_empty() {
+        let input = json(r#"{"title": "Hello", "body": null}"#);
+        let result = apply_template(&input, "# {{ .title }}\n\n{{ .body }}").unwrap();
+        assert_eq!(result, "# Hello\n\n");
+    }
+
+    #[test]
+    fn template_escape_sequences() {
+        let input = json(r#"{"a": "x", "b": "y"}"#);
+        let result = apply_template(&input, "{{ .a }}\\n{{ .b }}").unwrap();
+        assert_eq!(result, "x\ny");
+    }
+
+    // take filter test
+    #[test]
+    fn take_array() {
+        let input = json("[1, 2, 3, 4, 5]");
+        let result = apply(&input, Some(". | take(3)"), None).unwrap();
+        assert_eq!(result, json("[1, 2, 3]"));
     }
 }

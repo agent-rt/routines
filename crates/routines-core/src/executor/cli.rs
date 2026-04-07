@@ -150,6 +150,37 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
         }
     };
 
+    let diagnostic = if status == StepStatus::Failed {
+        let code = exit_code.unwrap_or(-1);
+        let suggestion = match code {
+            1 => "general failure — check stderr for details".to_string(),
+            2 => "invalid arguments — check command args".to_string(),
+            126 => format!("permission denied — check execute permissions on '{resolved_command}'"),
+            // 127 handled by NotFound earlier
+            c if c > 128 => {
+                let signal = c - 128;
+                let sig_name = match signal {
+                    9 => "SIGKILL",
+                    11 => "SIGSEGV",
+                    15 => "SIGTERM",
+                    _ => "unknown signal",
+                };
+                format!("killed by signal {signal} ({sig_name})")
+            }
+            _ => format!("exited with code {code}"),
+        };
+        Some(Diagnostic {
+            step_id: params.step_id.to_string(),
+            error_type: DiagnosticType::CliExitError,
+            status_code: None,
+            resolved_url: None,
+            suggestion,
+            fix_hint: None,
+        })
+    } else {
+        None
+    };
+
     Ok(StepResult {
         step_id: params.step_id.to_string(),
         status,
@@ -157,6 +188,6 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
         stdout,
         stderr,
         execution_time_ms: elapsed,
-        diagnostic: None,
+        diagnostic,
     })
 }

@@ -2,6 +2,7 @@ mod cli;
 mod http;
 mod mcp;
 mod routine;
+mod write;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -45,6 +46,7 @@ pub enum DiagnosticType {
     TransformType,
     CliNotFound,
     CliTimeout,
+    CliExitError,
     TemplateError,
     ArgsTooLong,
 }
@@ -430,10 +432,23 @@ fn execute_step(
             },
             ctx,
         ),
+        StepAction::Write {
+            path,
+            content,
+            mode,
+        } => write::execute(
+            &step.id,
+            path,
+            content,
+            mode,
+            routine.strict_mode,
+            ctx,
+        ),
         StepAction::Transform {
             input,
             select,
             mapping,
+            template,
         } => {
             let start = std::time::Instant::now();
             let resolved_input = ctx.resolve(input, &step.id)?;
@@ -442,6 +457,57 @@ fn execute_step(
                     step_id: step.id.clone(),
                     message: format!("input is not valid JSON: {e}"),
                 })?;
+
+            // Template mode: multi-field string interpolation (output is plain text)
+            // Note: template uses {{ .field }} for JSON field access — do NOT resolve through ctx
+            // (ctx would try to interpret {{ .field }} as a step reference and fail)
+            if let Some(tmpl) = template {
+                let resolved_tmpl = tmpl.clone();
+                // Apply select first if present
+                let selected = match select {
+                    Some(sel) => {
+                        let resolved_sel = ctx.resolve(sel, &step.id)?;
+                        if resolved_sel.contains('|') {
+                            crate::transform::evaluate_expr_pub(&json_input, &resolved_sel)?
+                        } else {
+                            crate::transform::navigate_pub(&json_input, &resolved_sel)?
+                        }
+                    }
+                    None => json_input,
+                };
+                match crate::transform::apply_template(&selected, &resolved_tmpl) {
+                    Ok(text) => {
+                        return Ok(StepResult {
+                            step_id: step.id.clone(),
+                            status: StepStatus::Success,
+                            exit_code: Some(0),
+                            stdout: text,
+                            stderr: String::new(),
+                            execution_time_ms: start.elapsed().as_millis() as u64,
+                            diagnostic: None,
+                        });
+                    }
+                    Err(e) => {
+                        return Ok(StepResult {
+                            step_id: step.id.clone(),
+                            status: StepStatus::Failed,
+                            exit_code: Some(1),
+                            stdout: String::new(),
+                            stderr: format!("{e}"),
+                            execution_time_ms: start.elapsed().as_millis() as u64,
+                            diagnostic: Some(Diagnostic {
+                                step_id: step.id.clone(),
+                                error_type: DiagnosticType::TransformType,
+                                status_code: None,
+                                resolved_url: None,
+                                suggestion: format!("template rendering failed: {e}"),
+                                fix_hint: None,
+                            }),
+                        });
+                    }
+                }
+            }
+
             // Resolve template variables in select path before parsing
             let resolved_select = select
                 .as_ref()

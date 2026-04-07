@@ -240,6 +240,15 @@ pub enum StepAction {
         #[serde(default)]
         arguments: HashMap<String, serde_json::Value>,
     },
+    Write {
+        /// File path to write to (supports template expressions).
+        path: String,
+        /// Content to write (supports template expressions).
+        content: String,
+        /// Write mode: overwrite (default) or append.
+        #[serde(default)]
+        mode: WriteMode,
+    },
     Transform {
         /// Template expression that resolves to a JSON string.
         input: String,
@@ -249,11 +258,24 @@ pub enum StepAction {
         /// Field mapping: output_key → path + filter pipeline. Uses IndexMap to preserve order.
         #[serde(default)]
         mapping: Option<indexmap::IndexMap<String, String>>,
+        /// Multi-field template: `{{ .field | filter }}` placeholders replaced from input JSON.
+        /// Mutually exclusive with mapping. Output is plain text, not JSON.
+        #[serde(default)]
+        template: Option<String>,
     },
 }
 
 fn default_method() -> String {
     "GET".to_string()
+}
+
+/// Write mode for file output steps.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WriteMode {
+    #[default]
+    Overwrite,
+    Append,
 }
 
 /// Error strategy for a step.
@@ -878,6 +900,7 @@ steps:
                 input,
                 select,
                 mapping,
+                ..
             } => {
                 assert_eq!(input, "{{ search.stdout }}");
                 assert_eq!(select.as_deref(), Some(".data.items"));
