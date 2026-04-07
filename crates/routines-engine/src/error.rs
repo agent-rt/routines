@@ -21,7 +21,7 @@ pub enum RoutineError {
     StepNotExecuted(String),
 
     #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(String),
 
     #[error("Dangerous command blocked in strict_mode: '{command}' in step '{step_id}'")]
     DangerousCommand { step_id: String, command: String },

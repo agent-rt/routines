@@ -15,7 +15,7 @@ use crate::parser::{
 };
 
 /// Structured diagnostic for Agent-parseable error context.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Diagnostic {
     pub step_id: String,
     pub error_type: DiagnosticType,
@@ -28,7 +28,7 @@ pub struct Diagnostic {
     pub fix_hint: Option<FixHint>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FixHint {
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,7 +37,7 @@ pub struct FixHint {
     pub template: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticType {
     HttpClientError,
@@ -52,7 +52,7 @@ pub enum DiagnosticType {
 }
 
 /// Result of executing a single step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StepResult {
     pub step_id: String,
     pub status: StepStatus,
@@ -65,7 +65,7 @@ pub struct StepResult {
     pub headers: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StepStatus {
     Success,
     Failed,
@@ -73,7 +73,7 @@ pub enum StepStatus {
 }
 
 /// Result of executing an entire routine.
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunResult {
     pub status: RunStatus,
     pub step_results: Vec<StepResult>,
@@ -83,7 +83,7 @@ pub struct RunResult {
     pub output_config: Option<OutputConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RunStatus {
     Success,
     Failed,

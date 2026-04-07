@@ -1,0 +1,12 @@
+pub mod attach;
+pub mod daemon;
+pub mod list;
+pub mod log;
+pub mod mcp;
+pub mod ps;
+pub mod registry;
+pub mod run;
+pub mod serve;
+pub mod test;
+pub mod tui;
+pub mod validate;

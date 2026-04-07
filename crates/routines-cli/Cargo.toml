@@ -8,6 +8,8 @@ name = "routines"
 path = "src/main.rs"
 
 [dependencies]
+routines-engine = { workspace = true }
+routines-protocol = { workspace = true }
 routines-core = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
@@ -19,3 +21,5 @@ dotenvy = { workspace = true }
 comfy-table = { workspace = true }
 colored = { workspace = true }
 inquire = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }

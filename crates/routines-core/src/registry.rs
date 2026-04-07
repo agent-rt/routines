@@ -4,7 +4,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, RoutineError};
+use routines_engine::error::{Result, RoutineError};
 
 /// Configuration for all registries.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,8 +1,13 @@
 use rusqlite::Connection;
 
-use crate::error::Result;
-use crate::executor::{RunResult, RunStatus, StepResult, StepStatus};
-use crate::secrets;
+use routines_engine::error::{Result, RoutineError};
+use routines_engine::executor::{RunResult, RunStatus, StepResult, StepStatus};
+use routines_engine::secrets;
+
+/// Convert rusqlite errors into RoutineError::Database
+fn db_err(e: rusqlite::Error) -> RoutineError {
+    RoutineError::Database(e.to_string())
+}
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS routine_runs (
@@ -48,8 +53,8 @@ impl AuditDb {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(db_path)?;
-        conn.execute_batch(SCHEMA)?;
+        let conn = Connection::open(db_path).map_err(db_err)?;
+        conn.execute_batch(SCHEMA).map_err(db_err)?;
         // Run migrations (ignore errors for already-existing columns)
         for line in MIGRATIONS.lines() {
             let line = line.trim();
@@ -62,8 +67,8 @@ impl AuditDb {
 
     /// Open an in-memory database (for testing).
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
+        let conn = Connection::open_in_memory().map_err(db_err)?;
+        conn.execute_batch(SCHEMA).map_err(db_err)?;
         Ok(Self { conn })
     }
 
@@ -78,7 +83,7 @@ impl AuditDb {
         self.conn.execute(
             "INSERT INTO routine_runs (id, routine_name, status, input_vars, started_at) VALUES (?1, ?2, 'RUNNING', ?3, ?4)",
             rusqlite::params![run_id, routine_name, input_vars_json, started_at],
-        )?;
+        ).map_err(db_err)?;
         Ok(())
     }
 
@@ -103,8 +108,8 @@ impl AuditDb {
 
         self.conn.execute(
             "INSERT INTO step_logs (id, run_id, step_id, status, exit_code, stdout, stderr, input_vars, execution_time_ms, started_at, stdout_tokens, stderr_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            rusqlite::params![id, run_id, step.step_id, status, step.exit_code, stdout, stderr, "", step.execution_time_ms, started_at, stdout_tokens, stderr_tokens],
-        )?;
+            rusqlite::params![id, run_id, step.step_id, status, step.exit_code, stdout, stderr, "", step.execution_time_ms as i64, started_at, stdout_tokens, stderr_tokens],
+        ).map_err(db_err)?;
         Ok(())
     }
 
@@ -117,7 +122,7 @@ impl AuditDb {
         self.conn.execute(
             "UPDATE routine_runs SET status = ?1, ended_at = ?2, output = ?3 WHERE id = ?4",
             rusqlite::params![status, ended_at, result.output, run_id],
-        )?;
+        ).map_err(db_err)?;
         Ok(())
     }
 
@@ -125,7 +130,7 @@ impl AuditDb {
     pub fn get_run_log(&self, run_id: &str) -> Result<Option<RunLog>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, routine_name, status, input_vars, started_at, ended_at, output FROM routine_runs WHERE id = ?1",
-        )?;
+        ).map_err(db_err)?;
         let run = stmt
             .query_row(rusqlite::params![run_id], |row| {
                 Ok(RunLog {
@@ -144,7 +149,7 @@ impl AuditDb {
         if let Some(mut run) = run {
             let mut stmt = self.conn.prepare(
                 "SELECT step_id, status, exit_code, stdout, stderr, execution_time_ms, started_at, stdout_tokens, stderr_tokens FROM step_logs WHERE run_id = ?1 ORDER BY started_at",
-            )?;
+            ).map_err(db_err)?;
             let steps = stmt.query_map(rusqlite::params![run_id], |row| {
                 Ok(StepLog {
                     step_id: row.get(0)?,
@@ -157,9 +162,9 @@ impl AuditDb {
                     stdout_tokens: row.get(7).unwrap_or(None),
                     stderr_tokens: row.get(8).unwrap_or(None),
                 })
-            })?;
+            }).map_err(db_err)?;
             for step in steps {
-                run.steps.push(step?);
+                run.steps.push(step.map_err(db_err)?);
             }
             Ok(Some(run))
         } else {
@@ -171,8 +176,8 @@ impl AuditDb {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, started_at, ended_at FROM routine_runs \
              WHERE routine_name = ?1 ORDER BY started_at DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![routine_name, limit], |row| {
+        ).map_err(db_err)?;
+        let rows = stmt.query_map(rusqlite::params![routine_name, limit as i64], |row| {
             let started: String = row.get(2)?;
             let ended: Option<String> = row.get(3)?;
             Ok(RunSummary {
@@ -181,10 +186,10 @@ impl AuditDb {
                 started_at: started,
                 ended_at: ended,
             })
-        })?;
+        }).map_err(db_err)?;
         let mut results = Vec::new();
         for row in rows {
-            results.push(row?);
+            results.push(row.map_err(db_err)?);
         }
         Ok(results)
     }

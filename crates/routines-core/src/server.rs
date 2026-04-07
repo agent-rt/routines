@@ -11,10 +11,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::audit::AuditDb;
-use crate::executor::{self, RunStatus, StepStatus};
-use crate::parser::{Routine, StepAction};
-use crate::resolve::resolve_routine_path;
-use crate::secrets;
+use routines_engine::executor::{self, RunStatus, StepStatus};
+use routines_engine::parser::{Routine, StepAction};
+use routines_engine::resolve::resolve_routine_path;
+use routines_engine::secrets;
 
 fn routines_dir() -> PathBuf {
     std::env::var("ROUTINES_HOME")
@@ -26,6 +26,30 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Try to execute a routine via the daemon. Returns None if daemon is not running.
+async fn try_run_via_daemon(
+    name: &str,
+    inputs: &std::collections::HashMap<String, String>,
+) -> Option<routines_engine::executor::RunResult> {
+    use routines_protocol::DaemonClient;
+    use routines_protocol::types::RunEvent;
+
+    let mut client = DaemonClient::try_connect().await.ok()??;
+    let run_id = client.submit(name, inputs.clone()).await.ok()?;
+
+    let mut final_result = None;
+    client
+        .subscribe(&run_id, |event| {
+            if let RunEvent::RunCompleted { result, .. } = event {
+                final_result = Some(result.as_ref().clone());
+            }
+        })
+        .await
+        .ok()?;
+
+    final_result
 }
 
 /// A recorded step in an explore session.
@@ -295,9 +319,9 @@ Example:
 /// Render output for MCP responses. Table format converts JSON array to compact text.
 fn render_output_for_mcp(
     output: &str,
-    output_config: Option<&crate::parser::OutputConfig>,
+    output_config: Option<&routines_engine::parser::OutputConfig>,
 ) -> String {
-    use crate::parser::OutputFormat;
+    use routines_engine::parser::OutputFormat;
 
     let Some(cfg) = output_config else {
         return output.to_string();
@@ -402,7 +426,7 @@ fn apply_patch(routine: &mut Routine, ops: &[PatchOp]) -> std::result::Result<()
     for op in ops {
         match op {
             PatchOp::ReplaceStep { step_id, step_yaml } => {
-                let step: crate::parser::Step = serde_yaml::from_str(step_yaml)
+                let step: routines_engine::parser::Step = serde_yaml::from_str(step_yaml)
                     .map_err(|e| format!("replace_step '{step_id}': invalid YAML: {e}"))?;
                 let pos = routine
                     .steps
@@ -412,7 +436,7 @@ fn apply_patch(routine: &mut Routine, ops: &[PatchOp]) -> std::result::Result<()
                 routine.steps[pos] = step;
             }
             PatchOp::AddStep { after, step_yaml } => {
-                let step: crate::parser::Step = serde_yaml::from_str(step_yaml)
+                let step: routines_engine::parser::Step = serde_yaml::from_str(step_yaml)
                     .map_err(|e| format!("add_step: invalid YAML: {e}"))?;
                 match after {
                     Some(after_id) => {
@@ -477,9 +501,9 @@ fn apply_set_field(
         "output.value" => {
             routine
                 .output
-                .get_or_insert_with(|| crate::parser::OutputConfig {
+                .get_or_insert_with(|| routines_engine::parser::OutputConfig {
                     value: String::new(),
-                    format: crate::parser::OutputFormat::default(),
+                    format: routines_engine::parser::OutputFormat::default(),
                     columns: None,
                 })
                 .value = str_val()?
@@ -487,9 +511,9 @@ fn apply_set_field(
         "output.format" => {
             routine
                 .output
-                .get_or_insert_with(|| crate::parser::OutputConfig {
+                .get_or_insert_with(|| routines_engine::parser::OutputConfig {
                     value: String::new(),
-                    format: crate::parser::OutputFormat::default(),
+                    format: routines_engine::parser::OutputFormat::default(),
                     columns: None,
                 })
                 .format = deser(value)?
@@ -497,9 +521,9 @@ fn apply_set_field(
         "output.columns" => {
             routine
                 .output
-                .get_or_insert_with(|| crate::parser::OutputConfig {
+                .get_or_insert_with(|| routines_engine::parser::OutputConfig {
                     value: String::new(),
-                    format: crate::parser::OutputFormat::default(),
+                    format: routines_engine::parser::OutputFormat::default(),
                     columns: None,
                 })
                 .columns = deser(value)?
@@ -601,7 +625,7 @@ fn err_internal(msg: String) -> ErrorData {
 }
 
 /// Collect all template strings from a step for static analysis.
-fn collect_step_templates(step: &crate::parser::Step) -> Vec<String> {
+fn collect_step_templates(step: &routines_engine::parser::Step) -> Vec<String> {
     let mut templates = Vec::new();
     if let Some(when) = &step.when {
         templates.push(when.clone());
@@ -825,7 +849,7 @@ pub fn collect_routines_recursive(dir: &std::path::Path, prefix: &str) -> Vec<Ro
 }
 
 /// Format input descriptions for list output.
-fn format_inputs(inputs: &[crate::parser::InputDef], has_required: &mut bool) -> String {
+fn format_inputs(inputs: &[routines_engine::parser::InputDef], has_required: &mut bool) -> String {
     if inputs.is_empty() {
         return String::new();
     }
@@ -1125,9 +1149,9 @@ impl RoutinesMcpServer {
                 let yaml_content = params
                     .yaml_content
                     .ok_or_else(|| err_params("'yaml_content' required for test".into()))?;
-                let suite = crate::testing::TestSuite::from_yaml(&yaml_content)
+                let suite = routines_engine::testing::TestSuite::from_yaml(&yaml_content)
                     .map_err(|e| err_params(format!("Invalid test YAML: {e}")))?;
-                let results = crate::testing::run_test_suite(&suite, &routines_dir());
+                let results = routines_engine::testing::run_test_suite(&suite, &routines_dir());
                 let mut out = String::new();
                 let mut pass = 0;
                 let mut fail = 0;
@@ -1226,7 +1250,7 @@ impl RoutinesMcpServer {
                     })?;
 
                     // Parse step YAML into a Step
-                    let step: crate::parser::Step = serde_yaml::from_str(&step_yaml)
+                    let step: routines_engine::parser::Step = serde_yaml::from_str(&step_yaml)
                         .map_err(|e| err_params(format!("Invalid step YAML: {e}")))?;
 
                     // Build a minimal routine wrapper for execution
@@ -1238,14 +1262,14 @@ impl RoutinesMcpServer {
                         strict_mode: false,
                         finally: Vec::new(),
                         output: None,
-                        secrets_env: crate::parser::SecretsEnv::None,
+                        secrets_env: routines_engine::parser::SecretsEnv::None,
                         routine_timeout: None,
-                        audit: crate::parser::AuditLevel::None,
+                        audit: routines_engine::parser::AuditLevel::None,
                     };
 
                     let inputs = params.inputs.unwrap_or_default();
                     let secret_map = secrets::load_secrets(&routines_dir().join(".env"));
-                    let mut ctx = crate::context::Context::new(inputs, secret_map.clone());
+                    let mut ctx = routines_engine::context::Context::new(inputs, secret_map.clone());
 
                     // Auto-inject outputs from prior session steps
                     {
@@ -1254,7 +1278,7 @@ impl RoutinesMcpServer {
                             for recorded in &session.steps {
                                 ctx.add_step_output(
                                     recorded.step_id.clone(),
-                                    crate::context::StepOutput {
+                                    routines_engine::context::StepOutput {
                                         stdout: recorded.stdout.clone(),
                                         stderr: String::new(),
                                         exit_code: Some(0),
@@ -1270,7 +1294,7 @@ impl RoutinesMcpServer {
                         for (sid, mock) in mock_ctx {
                             ctx.add_step_output(
                                 sid,
-                                crate::context::StepOutput {
+                                routines_engine::context::StepOutput {
                                     stdout: mock.stdout.unwrap_or_default(),
                                     stderr: mock.stderr.unwrap_or_default(),
                                     exit_code: mock.exit_code,
@@ -1371,14 +1395,14 @@ impl RoutinesMcpServer {
                 }
 
                 let secret_map = secrets::load_secrets(&routines_dir().join(".env"));
-                let mut ctx = crate::context::Context::new(resolved_inputs, secret_map.clone());
+                let mut ctx = routines_engine::context::Context::new(resolved_inputs, secret_map.clone());
 
                 // Inject mock upstream outputs
                 if let Some(mock_ctx) = params.mock_context {
                     for (sid, mock) in mock_ctx {
                         ctx.add_step_output(
                             sid,
-                            crate::context::StepOutput {
+                            routines_engine::context::StepOutput {
                                 stdout: mock.stdout.unwrap_or_default(),
                                 stderr: mock.stderr.unwrap_or_default(),
                                 exit_code: mock.exit_code,
@@ -1530,7 +1554,7 @@ impl RoutinesMcpServer {
             .map(|k| (k.clone(), "[REDACTED]".to_string()))
             .collect();
 
-        let ctx = crate::context::Context::new(resolved_inputs, redacted_secrets);
+        let ctx = routines_engine::context::Context::new(resolved_inputs, redacted_secrets);
         let mut out = String::new();
 
         for (i, step) in routine.steps.iter().enumerate() {
@@ -1719,7 +1743,7 @@ impl RoutinesMcpServer {
                     .unwrap_or_else(|e| format!("<error: {e}>"));
                 let _ = writeln!(out, "    when: {resolved}");
             }
-            if step.on_fail == crate::parser::OnFail::Continue {
+            if step.on_fail == routines_engine::parser::OnFail::Continue {
                 let _ = writeln!(out, "    on_fail: continue");
             }
             if let Some(timeout) = step.timeout {
@@ -1737,10 +1761,10 @@ impl RoutinesMcpServer {
             }
             if let Some(for_each) = &step.for_each {
                 match for_each {
-                    crate::parser::ForEach::List(items) => {
+                    routines_engine::parser::ForEach::List(items) => {
                         let _ = writeln!(out, "    for_each: [{}]", items.join(", "));
                     }
-                    crate::parser::ForEach::Template(t) => {
+                    routines_engine::parser::ForEach::Template(t) => {
                         let resolved = ctx
                             .resolve(t, &step.id)
                             .unwrap_or_else(|e| format!("<error: {e}>"));
@@ -1762,14 +1786,14 @@ impl RoutinesMcpServer {
 
         // Show secrets_env config
         match &routine.secrets_env {
-            crate::parser::SecretsEnv::None => {}
-            crate::parser::SecretsEnv::Auto => {
+            routines_engine::parser::SecretsEnv::None => {}
+            routines_engine::parser::SecretsEnv::Auto => {
                 let _ = writeln!(
                     out,
                     "\nSecrets env: auto (all secrets injected as env vars)"
                 );
             }
-            crate::parser::SecretsEnv::List(names) => {
+            routines_engine::parser::SecretsEnv::List(names) => {
                 let _ = writeln!(out, "\nSecrets env: [{}]", names.join(", "));
             }
         }
@@ -1838,7 +1862,7 @@ impl RoutinesMcpServer {
         // Show output declaration
         if let Some(output_cfg) = &routine.output {
             let _ = writeln!(out, "\nOutput: {}", output_cfg.value);
-            if output_cfg.format != crate::parser::OutputFormat::Plain {
+            if output_cfg.format != routines_engine::parser::OutputFormat::Plain {
                 let _ = writeln!(out, "Format: {:?}", output_cfg.format);
             }
             if let Some(cols) = &output_cfg.columns {
@@ -1862,7 +1886,7 @@ impl RoutinesMcpServer {
         let routine = Routine::from_file(&yaml_path)
             .map_err(|e| err_internal(format!("Parse error: {e}")))?;
 
-        use crate::parser::AuditLevel;
+        use routines_engine::parser::AuditLevel;
 
         let secret_map = secrets::load_secrets(&routines_dir().join(".env"));
         let audit_level = &routine.audit;
@@ -1889,8 +1913,12 @@ impl RoutinesMcpServer {
                 .map_err(|e| err_internal(format!("DB write error: {e}")))?;
         }
 
-        let result = executor::run_routine(&routine, params.inputs, secret_map.clone())
-            .map_err(|e| err_internal(format!("Execution error: {e}")))?;
+        // Try daemon first, fall back to direct execution
+        let result = match try_run_via_daemon(&params.name, &params.inputs).await {
+            Some(r) => r,
+            None => executor::run_routine(&routine, params.inputs, secret_map.clone())
+                .map_err(|e| err_internal(format!("Execution error: {e}")))?,
+        };
 
         if let Some(db) = &db {
             match audit_level {

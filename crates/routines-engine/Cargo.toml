@@ -1,15 +1,12 @@
 [package]
-name = "routines-core"
+name = "routines-engine"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-routines-engine = { workspace = true }
-routines-protocol = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 serde_json = { workspace = true }
-rusqlite = { workspace = true }
 uuid = { workspace = true }
 dotenvy = { workspace = true }
 chrono = { workspace = true }

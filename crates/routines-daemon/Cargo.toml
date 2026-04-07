@@ -1,21 +1,21 @@
 [package]
-name = "routines-core"
+name = "routines-daemon"
 version.workspace = true
 edition.workspace = true
+
+[[bin]]
+name = "routinesd"
+path = "src/main.rs"
 
 [dependencies]
 routines-engine = { workspace = true }
 routines-protocol = { workspace = true }
-serde = { workspace = true }
-serde_yaml = { workspace = true }
-serde_json = { workspace = true }
 rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 uuid = { workspace = true }
-dotenvy = { workspace = true }
 chrono = { workspace = true }
-thiserror = { workspace = true }
-rmcp = { workspace = true }
 tokio = { workspace = true }
-schemars = { workspace = true }
-ureq = { workspace = true }
-indexmap = { workspace = true }
+thiserror = { workspace = true }
+dotenvy = { workspace = true }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/routines-core", "crates/routines-cli"]
+members = ["crates/routines-engine", "crates/routines-protocol", "crates/routines-core", "crates/routines-daemon", "crates/routines-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -7,11 +7,14 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+routines-engine = { path = "crates/routines-engine" }
+routines-protocol = { path = "crates/routines-protocol" }
 routines-core = { path = "crates/routines-core" }
+routines-daemon = { path = "crates/routines-daemon" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
@@ -25,3 +28,5 @@ comfy-table = "7"
 colored = "3"
 indexmap = { version = "2", features = ["serde"] }
 inquire = "0.7"
+ratatui = "0.30"
+crossterm = "0.29"
