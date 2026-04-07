@@ -1800,6 +1800,7 @@ dependencies = [
  "ratatui",
  "rmcp",
  "routines-core",
+ "routines-daemon",
  "routines-engine",
  "routines-protocol",
  "serde_json",

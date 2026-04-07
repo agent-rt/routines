@@ -48,7 +48,8 @@ enum Commands {
         inputs: Vec<String>,
     },
     /// Start MCP server (stdio transport)
-    Serve,
+    #[command(name = "mcp")]
+    McpServe,
     /// Show audit log for a routine run
     Log {
         /// Run ID (UUID) to display
@@ -58,7 +59,8 @@ enum Commands {
         full: bool,
     },
     /// Manage MCP server configurations
-    Mcp {
+    #[command(name = "mcp-config")]
+    McpConfig {
         #[command(subcommand)]
         action: McpAction,
     },
@@ -161,6 +163,9 @@ pub enum DaemonAction {
     Stop,
     /// Show daemon status
     Status,
+    /// Run the daemon process (internal, do not call directly)
+    #[command(hide = true)]
+    Run,
 }
 
 fn main() {
@@ -180,9 +185,9 @@ fn dispatch(cli: Cli) -> routines_core::error::Result<()> {
             detach,
             inputs,
         } => cmd::run::cmd_run(&name, &inputs, quiet, verbose, detach),
-        Commands::Serve => cmd::serve::cmd_serve(),
+        Commands::McpServe => cmd::serve::cmd_serve(),
         Commands::Log { run_id, full } => cmd::log::cmd_log(&run_id, full),
-        Commands::Mcp { action } => cmd::mcp::cmd_mcp(action),
+        Commands::McpConfig { action } => cmd::mcp::cmd_mcp(action),
         Commands::Registry { action } => cmd::registry::cmd_registry(action),
         Commands::List => cmd::list::cmd_list(),
         Commands::Validate { file } => cmd::validate::cmd_validate(&file),

@@ -10,8 +10,16 @@ pub fn cmd_daemon(action: DaemonAction) -> routines_core::error::Result<()> {
             DaemonAction::Start => daemon_start().await,
             DaemonAction::Stop => daemon_stop().await,
             DaemonAction::Status => daemon_status().await,
+            DaemonAction::Run => daemon_run().await,
         }
     })
+}
+
+/// Run the daemon process directly (called via `routines daemon run`).
+async fn daemon_run() -> routines_core::error::Result<()> {
+    let sock_path = routines_protocol::types::default_socket_path();
+    routines_daemon::start_server(sock_path).await;
+    Ok(())
 }
 
 async fn daemon_start() -> routines_core::error::Result<()> {

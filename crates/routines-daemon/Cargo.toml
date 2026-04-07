@@ -3,9 +3,8 @@ name = "routines-daemon"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "routinesd"
-path = "src/main.rs"
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 routines-engine = { workspace = true }

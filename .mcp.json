@@ -2,7 +2,7 @@
   "mcpServers": {
     "routines": {
       "command": "/Users/linguofeng/.cargo/bin/routines",
-      "args": ["serve"]
+      "args": ["mcp"]
     }
   }
 }

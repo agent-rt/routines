@@ -11,7 +11,7 @@ use routines_engine::resolve::resolve_routine_path;
 use routines_protocol::codec;
 use routines_protocol::types::*;
 
-mod runner;
+pub mod runner;
 
 // ---------------------------------------------------------------------------
 // Daemon state
@@ -46,12 +46,12 @@ impl DaemonState {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Public entry point
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() {
-    let sock_path = parse_socket_arg();
+/// Start the daemon server, listening on the given Unix socket path.
+/// This function runs until the process is terminated.
+pub async fn start_server(sock_path: PathBuf) {
     let routines_dir = sock_path
         .parent()
         .unwrap_or(std::path::Path::new("/tmp"))
@@ -108,16 +108,6 @@ async fn main() {
             }
         }
     }
-}
-
-fn parse_socket_arg() -> PathBuf {
-    let args: Vec<String> = std::env::args().collect();
-    for i in 0..args.len() {
-        if args[i] == "--socket" && args.get(i + 1).is_some() {
-            return PathBuf::from(&args[i + 1]);
-        }
-    }
-    default_socket_path()
 }
 
 // ---------------------------------------------------------------------------

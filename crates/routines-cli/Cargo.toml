@@ -11,6 +11,7 @@ path = "src/main.rs"
 routines-engine = { workspace = true }
 routines-protocol = { workspace = true }
 routines-core = { workspace = true }
+routines-daemon = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

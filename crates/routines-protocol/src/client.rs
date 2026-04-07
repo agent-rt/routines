@@ -203,11 +203,9 @@ impl DaemonClient {
         }
     }
 
-    /// Auto-start the daemon by spawning `routinesd` as a detached process.
+    /// Auto-start the daemon by spawning `routines daemon run` as a detached process.
     fn auto_start_daemon(sock_path: &Path) -> Result<(), ClientError> {
-        // Determine the daemon binary path.
-        // Try sibling of current exe first, then PATH.
-        let daemon_bin = find_daemon_binary();
+        let daemon_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("routines"));
 
         let routines_dir = sock_path
             .parent()
@@ -220,31 +218,18 @@ impl DaemonClient {
         }
 
         let child = Command::new(&daemon_bin)
-            .arg("--socket")
-            .arg(sock_path)
+            .args(["daemon", "run"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            // Detach: on Unix this creates a new process group
             .spawn();
 
         match child {
             Ok(_) => Ok(()),
             Err(e) => Err(ClientError::DaemonStartFailed(format!(
-                "failed to spawn {}: {e}",
+                "failed to spawn {} daemon run: {e}",
                 daemon_bin.display()
             ))),
         }
     }
-}
-
-/// Find the routinesd binary: first try next to current exe, then fall back to PATH.
-fn find_daemon_binary() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        let sibling = exe.with_file_name("routinesd");
-        if sibling.exists() {
-            return sibling;
-        }
-    }
-    PathBuf::from("routinesd")
 }
