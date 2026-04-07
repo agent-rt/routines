@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::context::Context;
 use crate::error::{Result, RoutineError};
 
-use super::{StepResult, StepStatus, check_dangerous};
+use super::{Diagnostic, DiagnosticType, StepResult, StepStatus, check_dangerous};
 
 /// Parameters for executing a CLI step.
 pub(super) struct CliParams<'a> {
@@ -67,7 +67,29 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
         cmd.current_dir(dir);
     }
 
-    let mut child = cmd.spawn().map_err(RoutineError::Io)?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let elapsed = start.elapsed().as_millis() as u64;
+            return Ok(StepResult {
+                step_id: params.step_id.to_string(),
+                status: StepStatus::Failed,
+                exit_code: Some(127),
+                stdout: String::new(),
+                stderr: format!("command not found: {resolved_command}"),
+                execution_time_ms: elapsed,
+                diagnostic: Some(Diagnostic {
+                    step_id: params.step_id.to_string(),
+                    error_type: DiagnosticType::CliNotFound,
+                    status_code: None,
+                    resolved_url: None,
+                    suggestion: format!("install '{resolved_command}' or check PATH"),
+                    fix_hint: None,
+                }),
+            });
+        }
+        Err(e) => return Err(RoutineError::Io(e)),
+    };
 
     if let (Some(data), Some(mut stdin)) = (&stdin_data, child.stdin.take()) {
         stdin.write_all(data.as_bytes())?;
@@ -90,6 +112,14 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
                             stdout: String::new(),
                             stderr: format!("Timed out after {timeout_secs}s"),
                             execution_time_ms: elapsed,
+                            diagnostic: Some(Diagnostic {
+                                step_id: params.step_id.to_string(),
+                                error_type: DiagnosticType::CliTimeout,
+                                status_code: None,
+                                resolved_url: None,
+                                suggestion: format!("increase timeout (current: {timeout_secs}s) or optimize command"),
+                                fix_hint: None,
+                            }),
                         });
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -125,5 +155,6 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
         stdout,
         stderr,
         execution_time_ms: elapsed,
+        diagnostic: None,
     })
 }

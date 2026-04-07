@@ -13,8 +13,9 @@ pub fn apply(
     select: Option<&str>,
     mapping: Option<&IndexMap<String, String>>,
 ) -> Result<Value> {
-    // Step 1: select
+    // Step 1: select (supports filter pipeline via `|`)
     let selected = match select {
+        Some(expr) if expr.contains('|') => evaluate_expr(input, expr)?,
         Some(path) => navigate(input, path)?,
         None => input.clone(),
     };
@@ -259,6 +260,22 @@ fn apply_filter(value: &Value, filter: &str) -> Result<Value> {
         (filter, None)
     };
 
+    // Null safety: specific filters coerce null to zero-values, others propagate null
+    if value.is_null() {
+        return match name {
+            "to_int" | "ceil_div" => Ok(Value::Number(serde_json::Number::from(0i64))),
+            "to_float" => Ok(serde_json::to_value(0.0f64).unwrap_or(Value::Null)),
+            "to_string" | "trim" | "slice" => Ok(Value::String(String::new())),
+            "range" => Ok(Value::Array(Vec::new())),
+            "flatten" | "take" => Ok(Value::Array(Vec::new())),
+            "default" => {
+                let default_val = parse_string_arg(args.unwrap_or(""));
+                Ok(Value::String(default_val))
+            }
+            _ => Ok(Value::Null),
+        };
+    }
+
     match name {
         // Type conversion
         "to_int" => {
@@ -342,6 +359,65 @@ fn apply_filter(value: &Value, filter: &str) -> Result<Value> {
         "ceil" => {
             let n = value_to_f64(value)?;
             Ok(Value::Number(serde_json::Number::from(n.ceil() as i64)))
+        }
+
+        // Array ops
+        "flatten" => match value {
+            Value::Array(arr) => {
+                let mut flat = Vec::new();
+                for item in arr {
+                    if let Value::Array(inner) = item {
+                        flat.extend(inner.iter().cloned());
+                    } else {
+                        flat.push(item.clone());
+                    }
+                }
+                Ok(Value::Array(flat))
+            }
+            _ => Ok(value.clone()),
+        },
+
+        "take" => {
+            let n_str = args.ok_or_else(|| RoutineError::Transform {
+                step_id: String::new(),
+                message: "take requires a count argument".into(),
+            })?;
+            let n = n_str.trim().parse::<usize>().map_err(|_| RoutineError::Transform {
+                step_id: String::new(),
+                message: format!("take: cannot parse '{n_str}' as integer"),
+            })?;
+            match value {
+                Value::Array(arr) => Ok(Value::Array(arr.iter().take(n).cloned().collect())),
+                _ => Ok(value.clone()),
+            }
+        }
+
+        // Integer math
+        "ceil_div" => {
+            let divisor_str = args.ok_or_else(|| RoutineError::Transform {
+                step_id: String::new(),
+                message: "ceil_div requires a divisor argument".into(),
+            })?;
+            let divisor = divisor_str.trim().parse::<i64>().map_err(|_| RoutineError::Transform {
+                step_id: String::new(),
+                message: format!("ceil_div: cannot parse '{divisor_str}' as integer"),
+            })?;
+            if divisor == 0 {
+                return Err(RoutineError::Transform {
+                    step_id: String::new(),
+                    message: "ceil_div: division by zero".into(),
+                });
+            }
+            let n = value_to_f64(value)? as i64;
+            let result = (n + divisor - 1) / divisor;
+            Ok(Value::Number(serde_json::Number::from(result)))
+        }
+        "range" => {
+            let n = value_to_f64(value)? as i64;
+            let arr: Vec<Value> = (1..=n)
+                .map(|i| Value::Number(serde_json::Number::from(i)))
+                .collect();
+            Ok(Value::Array(arr))
         }
 
         // Formatting
@@ -744,6 +820,130 @@ mod tests {
             "arr": "14:30"
         }]"#);
         assert_eq!(result, expected);
+    }
+
+    // B1: null safety tests
+    #[test]
+    fn null_to_int_returns_zero() {
+        let input = json(r#"{"a": null}"#);
+        let mut mapping = IndexMap::new();
+        mapping.insert("v".to_string(), ".a | to_int".to_string());
+        let result = apply(&input, None, Some(&mapping)).unwrap();
+        assert_eq!(result, json(r#"{"v": 0}"#));
+    }
+
+    #[test]
+    fn null_to_float_returns_zero() {
+        let input = json(r#"{"a": null}"#);
+        let mut mapping = IndexMap::new();
+        mapping.insert("v".to_string(), ".a | to_float".to_string());
+        let result = apply(&input, None, Some(&mapping)).unwrap();
+        assert_eq!(result, json(r#"{"v": 0.0}"#));
+    }
+
+    #[test]
+    fn null_to_string_returns_empty() {
+        let input = json(r#"{"a": null}"#);
+        let mut mapping = IndexMap::new();
+        mapping.insert("v".to_string(), ".a | to_string".to_string());
+        let result = apply(&input, None, Some(&mapping)).unwrap();
+        assert_eq!(result, json(r#"{"v": ""}"#));
+    }
+
+    #[test]
+    fn null_slice_returns_empty() {
+        let input = json(r#"{"a": null}"#);
+        let mut mapping = IndexMap::new();
+        mapping.insert("v".to_string(), ".a | slice(0, 5)".to_string());
+        let result = apply(&input, None, Some(&mapping)).unwrap();
+        assert_eq!(result, json(r#"{"v": ""}"#));
+    }
+
+    #[test]
+    fn null_propagates_through_unknown_filters() {
+        let input = json(r#"{"a": null}"#);
+        let mut mapping = IndexMap::new();
+        mapping.insert("v".to_string(), ".a | join(',')".to_string());
+        let result = apply(&input, None, Some(&mapping)).unwrap();
+        assert_eq!(result, json(r#"{"v": null}"#));
+    }
+
+    #[test]
+    fn null_pipeline_to_int_no_error() {
+        // Real scenario: .comments | to_int where comments is null
+        let input = json(r#"{"comments": null}"#);
+        let mut mapping = IndexMap::new();
+        mapping.insert("count".to_string(), ".comments | to_int".to_string());
+        let result = apply(&input, None, Some(&mapping)).unwrap();
+        assert_eq!(result, json(r#"{"count": 0}"#));
+    }
+
+    #[test]
+    fn null_default_still_works() {
+        let input = json(r#"{"a": null}"#);
+        let mut mapping = IndexMap::new();
+        mapping.insert("v".to_string(), ".a | default('fallback')".to_string());
+        let result = apply(&input, None, Some(&mapping)).unwrap();
+        assert_eq!(result, json(r#"{"v": "fallback"}"#));
+    }
+
+    // B2: flatten tests
+    #[test]
+    fn flatten_nested_arrays() {
+        let input = json(r#"[[1, 2], [3, 4], [5]]"#);
+        let result = apply(&input, Some(". | flatten"), None).unwrap();
+        assert_eq!(result, json("[1, 2, 3, 4, 5]"));
+    }
+
+    #[test]
+    fn flatten_mixed_array() {
+        let input = json(r#"[[1, 2], 3, [4, 5]]"#);
+        let result = apply(&input, Some(". | flatten"), None).unwrap();
+        assert_eq!(result, json("[1, 2, 3, 4, 5]"));
+    }
+
+    #[test]
+    fn flatten_non_array_passthrough() {
+        let input = json(r#"{"a": 1}"#);
+        let result = apply(&input, Some(". | flatten"), None).unwrap();
+        assert_eq!(result, json(r#"{"a": 1}"#));
+    }
+
+    // B3: ceil_div + range tests
+    #[test]
+    fn ceil_div_exact() {
+        let input = json("200");
+        let result = apply(&input, Some(". | ceil_div(100)"), None).unwrap();
+        assert_eq!(result, json("2"));
+    }
+
+    #[test]
+    fn ceil_div_rounds_up() {
+        let input = json("150");
+        let result = apply(&input, Some(". | ceil_div(100)"), None).unwrap();
+        assert_eq!(result, json("2"));
+    }
+
+    #[test]
+    fn range_generates_sequence() {
+        let input = json("3");
+        let result = apply(&input, Some(". | range"), None).unwrap();
+        assert_eq!(result, json("[1, 2, 3]"));
+    }
+
+    #[test]
+    fn ceil_div_then_range_pagination() {
+        // Real scenario: NUM=150, pages = ceil(150/100) = 2, range = [1, 2]
+        let input = json("150");
+        let result = apply(&input, Some(". | ceil_div(100) | range"), None).unwrap();
+        assert_eq!(result, json("[1, 2]"));
+    }
+
+    #[test]
+    fn range_zero_returns_empty() {
+        let input = json("0");
+        let result = apply(&input, Some(". | range"), None).unwrap();
+        assert_eq!(result, json("[]"));
     }
 
     #[test]

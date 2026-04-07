@@ -32,6 +32,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
             stdout: String::new(),
             stderr: format!("Max routine nesting depth ({MAX_DEPTH}) exceeded"),
             execution_time_ms: 0,
+            diagnostic: None,
         });
     }
 
@@ -49,6 +50,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
                 yaml_path.display()
             ),
             execution_time_ms: 0,
+            diagnostic: None,
         });
     }
 
@@ -62,6 +64,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
                 stdout: String::new(),
                 stderr: format!("Failed to parse sub-routine '{}': {e}", params.name),
                 execution_time_ms: 0,
+                diagnostic: None,
             });
         }
     };
@@ -95,6 +98,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
             stdout: String::new(),
             stderr: format!("Sub-routine timed out after {t}s"),
             execution_time_ms: elapsed,
+            diagnostic: None,
         });
     }
 
@@ -126,5 +130,6 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
         stdout,
         stderr,
         execution_time_ms: elapsed,
+        diagnostic: None,
     })
 }

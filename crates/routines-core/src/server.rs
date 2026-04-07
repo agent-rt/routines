@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -27,9 +28,28 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-#[derive(Clone, Default)]
+/// A recorded step in an explore session.
+#[derive(Clone)]
+struct ExploreStep {
+    step_yaml: String,
+    step_id: String,
+    stdout: String,
+}
+
+/// An active explore session.
+struct ExploreSession {
+    name: String,
+    description: String,
+    steps: Vec<ExploreStep>,
+    created_at: std::time::Instant,
+}
+
+type SessionStore = Arc<Mutex<HashMap<String, ExploreSession>>>;
+
+#[derive(Clone)]
 pub struct RoutinesMcpServer {
     tool_router: ToolRouter<Self>,
+    sessions: SessionStore,
 }
 
 // --- Parameter structs ---
@@ -45,12 +65,12 @@ pub struct RunRoutineParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MetaParams {
-    /// Action: schema, get, create, validate, dry_run, test, history, log, run_step
+    /// Action: schema, get, create, validate, dry_run, test, history, log, run_step, explore, solidify
     pub action: String,
-    /// Routine name (for get/create/history/run_step) or run_id (for log)
+    /// Routine name (for get/create/history/run_step/explore) or run_id (for log)
     #[serde(default)]
     pub name: Option<String>,
-    /// Description (for create)
+    /// Description (for create/explore)
     #[serde(default)]
     pub description: Option<String>,
     /// YAML content (for create/validate/dry_run/test)
@@ -65,6 +85,12 @@ pub struct MetaParams {
     /// Mock upstream step outputs for run_step: {"step_id": {"stdout": "..."}}
     #[serde(default)]
     pub mock_context: Option<HashMap<String, StepMock>>,
+    /// Explore session ID (for run_step with session, solidify)
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Single step YAML (for run_step with session — standalone step definition)
+    #[serde(default)]
+    pub step_yaml: Option<String>,
 }
 
 /// Mock output for an upstream step, used in run_step.
@@ -300,6 +326,67 @@ fn text_ok(text: String) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
+/// Generate routine YAML from an explore session's recorded steps.
+fn generate_routine_yaml(session: &ExploreSession) -> String {
+    use std::collections::HashSet;
+
+    let mut yaml = String::new();
+    let _ = writeln!(yaml, "name: {}", session.name);
+    let _ = writeln!(yaml, "description: {}", session.description);
+
+    // Infer inputs: scan step YAML for {{ inputs.* }} references
+    let mut input_names: Vec<String> = Vec::new();
+    let mut seen_inputs = HashSet::new();
+    for es in &session.steps {
+        let rest = es.step_yaml.as_str();
+        for cap in find_template_vars(rest) {
+            if let Some(name) = cap.strip_prefix("inputs.")  && seen_inputs.insert(name.to_string()) {
+                input_names.push(name.to_string());
+            }
+        }
+    }
+    if !input_names.is_empty() {
+        let _ = writeln!(yaml, "inputs:");
+        for name in &input_names {
+            let _ = writeln!(yaml, "  - name: {name}");
+            let _ = writeln!(yaml, "    required: true");
+        }
+    }
+
+    let _ = writeln!(yaml, "steps:");
+    for es in &session.steps {
+        // Indent each line of step YAML by 2 spaces
+        let _ = writeln!(yaml, "  # --- step: {} ---", es.step_id);
+        for line in es.step_yaml.lines() {
+            let _ = writeln!(yaml, "  {line}");
+        }
+    }
+
+    // Infer output: last step's stdout
+    if let Some(last) = session.steps.last() {
+        let _ = writeln!(yaml, "output: \"{{{{ {}.stdout }}}}\"", last.step_id);
+    }
+
+    yaml
+}
+
+/// Extract template variable references like `inputs.FOO` from `{{ inputs.FOO }}` patterns.
+fn find_template_vars(text: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        rest = &rest[start + 2..];
+        if let Some(end) = rest.find("}}") {
+            let inner = rest[..end].trim();
+            vars.push(inner.to_string());
+            rest = &rest[end + 2..];
+        } else {
+            break;
+        }
+    }
+    vars
+}
+
 /// Recursively collect routine YAML files under a directory.
 /// Returns (relative_name, Routine) pairs sorted by name.
 pub fn collect_routines_recursive(
@@ -361,11 +448,18 @@ fn format_inputs(inputs: &[crate::parser::InputDef], has_required: &mut bool) ->
     format!(" (inputs: {})", parts.join(", "))
 }
 
+impl Default for RoutinesMcpServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tool_router]
 impl RoutinesMcpServer {
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -421,7 +515,7 @@ impl RoutinesMcpServer {
         text_ok(out.trim().to_string())
     }
 
-    #[tool(description = "Routine meta-operations: schema/get/create/validate/dry_run/test/history/log/run_step")]
+    #[tool(description = "Routine meta-operations: schema/get/create/validate/dry_run/test/history/log/run_step/explore/solidify")]
     async fn meta(
         &self,
         Parameters(params): Parameters<MetaParams>,
@@ -636,9 +730,118 @@ impl RoutinesMcpServer {
                 return text_ok(out.trim().to_string());
             }
             "run_step" => {
+                // Session-based explore mode: execute standalone step YAML
+                if let Some(ref session_id) = params.session {
+                    let step_yaml = params
+                        .step_yaml
+                        .ok_or_else(|| err_params("'step_yaml' required for run_step with session".into()))?;
+
+                    // Parse step YAML into a Step
+                    let step: crate::parser::Step = serde_yaml::from_str(&step_yaml)
+                        .map_err(|e| err_params(format!("Invalid step YAML: {e}")))?;
+
+                    // Build a minimal routine wrapper for execution
+                    let routine = Routine {
+                        name: "explore".to_string(),
+                        description: "explore session".to_string(),
+                        steps: vec![step.clone()],
+                        inputs: Vec::new(),
+                        strict_mode: false,
+                        finally: Vec::new(),
+                        output: None,
+                        output_format: crate::parser::OutputFormat::default(),
+                        secrets_env: crate::parser::SecretsEnv::None,
+                        routine_timeout: None,
+                        audit: crate::parser::AuditLevel::None,
+                    };
+
+                    let inputs = params.inputs.unwrap_or_default();
+                    let secret_map = secrets::load_secrets(&routines_dir().join(".env"));
+                    let mut ctx = crate::context::Context::new(inputs, secret_map.clone());
+
+                    // Auto-inject outputs from prior session steps
+                    {
+                        let store = self.sessions.lock().unwrap();
+                        if let Some(session) = store.get(session_id.as_str()) {
+                            for recorded in &session.steps {
+                                ctx.add_step_output(
+                                    recorded.step_id.clone(),
+                                    crate::context::StepOutput {
+                                        stdout: recorded.stdout.clone(),
+                                        stderr: String::new(),
+                                        exit_code: Some(0),
+                                    },
+                                );
+                            }
+                        }
+                    }
+
+                    // Also inject explicit mock_context if provided
+                    if let Some(mock_ctx) = params.mock_context {
+                        for (sid, mock) in mock_ctx {
+                            ctx.add_step_output(
+                                sid,
+                                crate::context::StepOutput {
+                                    stdout: mock.stdout.unwrap_or_default(),
+                                    stderr: mock.stderr.unwrap_or_default(),
+                                    exit_code: mock.exit_code,
+                                },
+                            );
+                        }
+                    }
+
+                    let result = executor::execute_single_step(&step, &routine, &ctx, &secret_map, &routines_dir());
+                    match result {
+                        Ok(sr) => {
+                            let status_str = match sr.status {
+                                StepStatus::Success => "OK",
+                                StepStatus::Failed => "FAIL",
+                                StepStatus::Skipped => "SKIP",
+                            };
+                            let mut out = format!(
+                                "[{status_str}] {} exit={} {}ms\n",
+                                sr.step_id,
+                                sr.exit_code.unwrap_or(-1),
+                                sr.execution_time_ms,
+                            );
+                            if !sr.stdout.is_empty() {
+                                let trimmed = sr.stdout.trim();
+                                let preview = if trimmed.len() > 500 {
+                                    format!("{}...(truncated)", &trimmed[..500])
+                                } else {
+                                    trimmed.to_string()
+                                };
+                                out.push_str(&format!("stdout: {preview}\n"));
+                            }
+                            if !sr.stderr.is_empty() {
+                                out.push_str(&format!("stderr: {}\n", sr.stderr.trim()));
+                            }
+
+                            // Record successful step to session
+                            if sr.status == StepStatus::Success {
+                                let mut store = self.sessions.lock().unwrap();
+                                if let Some(session) = store.get_mut(session_id.as_str()) {
+                                    session.steps.push(ExploreStep {
+                                        step_yaml,
+                                        step_id: sr.step_id.clone(),
+                                        stdout: sr.stdout.clone(),
+                                    });
+                                    let _ = write!(out, "\n(recorded to session — {}/{} steps)", session.name, session.steps.len());
+                                }
+                            }
+
+                            return text_ok(out.trim().to_string());
+                        }
+                        Err(e) => {
+                            return Err(err_internal(format!("Step execution error: {e}")));
+                        }
+                    }
+                }
+
+                // Original routine-based run_step mode
                 let name = params
                     .name
-                    .ok_or_else(|| err_params("'name' required for run_step".into()))?;
+                    .ok_or_else(|| err_params("'name' required for run_step (or provide 'session' + 'step_yaml')".into()))?;
                 let step_id = params
                     .step_id
                     .ok_or_else(|| err_params("'step_id' required for run_step".into()))?;
@@ -715,9 +918,61 @@ impl RoutinesMcpServer {
                     }
                 }
             }
+            "explore" => {
+                let name = params
+                    .name
+                    .ok_or_else(|| err_params("'name' required for explore".into()))?;
+                let description = params.description.unwrap_or_else(|| name.clone());
+
+                // Generate session ID
+                let session_id = format!("es_{:x}", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() & 0xFFFFFFFF);
+
+                let session = ExploreSession {
+                    name: name.clone(),
+                    description,
+                    steps: Vec::new(),
+                    created_at: std::time::Instant::now(),
+                };
+
+                // Clean up expired sessions (>30 min)
+                {
+                    let mut store = self.sessions.lock().unwrap();
+                    store.retain(|_, s| s.created_at.elapsed().as_secs() < 1800);
+                    store.insert(session_id.clone(), session);
+                }
+
+                return text_ok(format!(
+                    "explore session created: {session_id}\nroutine: {name}\nUse meta(action='run_step', session='{session_id}', step_yaml='...') to add steps\nUse meta(action='solidify', session='{session_id}') to generate routine YAML"
+                ));
+            }
+            "solidify" => {
+                let session_id = params
+                    .session
+                    .ok_or_else(|| err_params("'session' required for solidify".into()))?;
+
+                let session = {
+                    let mut store = self.sessions.lock().unwrap();
+                    store.remove(&session_id)
+                        .ok_or_else(|| err_params(format!("Session '{session_id}' not found or expired")))?
+                };
+
+                if session.steps.is_empty() {
+                    return Err(err_params("Session has no recorded steps — run some steps first".into()));
+                }
+
+                // Generate routine YAML from recorded steps
+                let yaml = generate_routine_yaml(&session);
+                return text_ok(format!(
+                    "solidified {}/{} steps into routine YAML:\n---\n{yaml}",
+                    session.name, session.steps.len()
+                ));
+            }
             other => {
                 return Err(err_params(format!(
-                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run, test, history, log, run_step"
+                    "Unknown action '{other}'. Use: schema, get, create, validate, dry_run, test, history, log, run_step, explore, solidify"
                 )));
             }
         }
@@ -1161,20 +1416,27 @@ impl RoutinesMcpServer {
                         }
                     }
                 }
-                // Diagnostic hint
+                // Structured diagnostic (Agent-parseable JSON)
                 let failed_step = result
                     .step_results
                     .iter()
                     .find(|s| s.status == StepStatus::Failed);
                 if let Some(fs) = failed_step {
-                    let hint = if fs.stderr.contains("timeout") || fs.stderr.contains("timed out") {
-                        "increase step/routine timeout or optimize command"
-                    } else if fs.stderr.contains("Missing required input") {
-                        "check required inputs with meta(action='get')"
+                    if let Some(diag) = &fs.diagnostic {
+                        if let Ok(json) = serde_json::to_string_pretty(diag) {
+                            let _ = write!(out, "diagnostic: {json}");
+                        }
                     } else {
-                        "use meta(action='log', name='<run_id>') for full stderr"
-                    };
-                    let _ = write!(out, "hint: {hint}");
+                        // Fallback text hint for steps without structured diagnostic
+                        let hint = if fs.stderr.contains("timeout") || fs.stderr.contains("timed out") {
+                            "increase step/routine timeout or optimize command"
+                        } else if fs.stderr.contains("Missing required input") {
+                            "check required inputs with meta(action='get')"
+                        } else {
+                            "use meta(action='log', name='<run_id>') for full stderr"
+                        };
+                        let _ = write!(out, "hint: {hint}");
+                    }
                 }
             }
         }

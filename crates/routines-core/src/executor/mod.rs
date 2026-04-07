@@ -11,6 +11,42 @@ use crate::context::{Context, StepOutput};
 use crate::error::{Result, RoutineError};
 use crate::parser::{BackoffStrategy, InputDef, InputType, OnFail, OutputFormat, Routine, Step, StepAction};
 
+/// Structured diagnostic for Agent-parseable error context.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Diagnostic {
+    pub step_id: String,
+    pub error_type: DiagnosticType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_url: Option<String>,
+    pub suggestion: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_hint: Option<FixHint>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FixHint {
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticType {
+    HttpClientError,
+    HttpServerError,
+    TransformNull,
+    TransformType,
+    CliNotFound,
+    CliTimeout,
+    TemplateError,
+    ArgsTooLong,
+}
+
 /// Result of executing a single step.
 #[derive(Debug, Clone)]
 pub struct StepResult {
@@ -20,6 +56,7 @@ pub struct StepResult {
     pub stdout: String,
     pub stderr: String,
     pub execution_time_ms: u64,
+    pub diagnostic: Option<Diagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -284,6 +321,7 @@ fn execute_step(
                 stdout: String::new(),
                 stderr: String::new(),
                 execution_time_ms: 0,
+                diagnostic: None,
             });
         }
     }
@@ -303,6 +341,7 @@ fn execute_step(
             stdout: mock.stdout.clone().unwrap_or_default(),
             stderr: mock.stderr.clone().unwrap_or_default(),
             execution_time_ms: 0,
+            diagnostic: None,
         });
     }
 
@@ -418,6 +457,7 @@ fn execute_step(
                         stdout,
                         stderr: String::new(),
                         execution_time_ms: start.elapsed().as_millis() as u64,
+                        diagnostic: None,
                     })
                 }
                 Err(e) => {
@@ -425,6 +465,14 @@ fn execute_step(
                         .as_deref()
                         .map(|s| format!(" — select: {s}"))
                         .unwrap_or_default();
+                    let err_msg = e.to_string();
+                    let (error_type, suggestion) = if err_msg.contains("cannot convert") {
+                        (DiagnosticType::TransformType, "check filter order or add type coercion (to_int/to_float/to_string)".to_string())
+                    } else if err_msg.contains("null") {
+                        (DiagnosticType::TransformNull, "add default() filter before conversion, e.g. .field | default('0') | to_int".to_string())
+                    } else {
+                        (DiagnosticType::TransformType, format!("transform failed: {err_msg}"))
+                    };
                     Ok(StepResult {
                         step_id: step.id.clone(),
                         status: StepStatus::Failed,
@@ -432,6 +480,14 @@ fn execute_step(
                         stdout: String::new(),
                         stderr: format!("{e}{context_info}"),
                         execution_time_ms: start.elapsed().as_millis() as u64,
+                        diagnostic: Some(Diagnostic {
+                            step_id: step.id.clone(),
+                            error_type,
+                            status_code: None,
+                            resolved_url: None,
+                            suggestion,
+                            fix_hint: None,
+                        }),
                     })
                 }
             }
@@ -558,6 +614,7 @@ fn execute_step_with_foreach(
             stdout: String::new(),
             stderr: "for_each: empty list".to_string(),
             execution_time_ms: 0,
+            diagnostic: None,
         }]);
     }
 
@@ -623,6 +680,7 @@ fn execute_step_with_foreach(
                                 stdout: String::new(),
                                 stderr: e.to_string(),
                                 execution_time_ms: 0,
+                                diagnostic: None,
                             },
                         };
                         sr.step_id = format!("{}[{}]", step.id, index);
@@ -731,6 +789,7 @@ fn run_finally(
                     stdout: String::new(),
                     stderr: e.to_string(),
                     execution_time_ms: 0,
+                    diagnostic: None,
                 });
             }
         }
@@ -761,6 +820,7 @@ fn run_sequential(
                 stdout: String::new(),
                 stderr: format!("routine timeout exceeded ({}s)", routine.routine_timeout.unwrap_or(0)),
                 execution_time_ms: 0,
+                diagnostic: None,
             });
             let run_status = RunStatus::Failed;
             run_finally(routine, &mut ctx, &secrets, &routines_dir, depth, &run_status, &mut step_results);
@@ -926,6 +986,7 @@ fn run_dag(
                             stdout: String::new(),
                             stderr: "Skipped due to upstream failure".to_string(),
                             execution_time_ms: 0,
+                            diagnostic: None,
                         }],
                     );
                     comp.insert(step_id);
@@ -956,6 +1017,7 @@ fn run_dag(
                             stdout: String::new(),
                             stderr: e.to_string(),
                             execution_time_ms: 0,
+                            diagnostic: None,
                         }],
                     };
 
@@ -1059,6 +1121,7 @@ fn run_dag(
                 stdout: String::new(),
                 stderr: "Skipped due to upstream failure".to_string(),
                 execution_time_ms: 0,
+                diagnostic: None,
             });
         }
     }
