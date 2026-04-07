@@ -65,7 +65,7 @@ pub struct RunRoutineParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MetaParams {
-    /// Action: guide, schema, get, create, update, validate, dry_run, test, history, log, run_step, explore, solidify
+    /// Action: guide, schema, get, create, update, diff, validate, dry_run, test, history, log, run_step, explore, solidify
     pub action: String,
     /// Routine name (for get/create/history/run_step/explore) or run_id (for log)
     #[serde(default)]
@@ -91,6 +91,30 @@ pub struct MetaParams {
     /// Single step YAML (for run_step with session — standalone step definition)
     #[serde(default)]
     pub step_yaml: Option<String>,
+    /// Patch operations for incremental update (mutually exclusive with yaml_content in update)
+    #[serde(default)]
+    pub patch: Option<Vec<PatchOp>>,
+}
+
+/// Patch operation for incremental routine updates.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PatchOp {
+    /// Replace an existing step by ID with new step YAML.
+    ReplaceStep { step_id: String, step_yaml: String },
+    /// Add a new step. If `after` is set, insert after that step ID; otherwise prepend.
+    AddStep {
+        #[serde(default)]
+        after: Option<String>,
+        step_yaml: String,
+    },
+    /// Remove a step by ID.
+    RemoveStep { step_id: String },
+    /// Set a top-level field (supports dot-path like "output.format").
+    Set {
+        path: String,
+        value: serde_json::Value,
+    },
 }
 
 /// Mock output for an upstream step, used in run_step.
@@ -371,6 +395,205 @@ fn enhanced_validate(routine: &Routine) -> (Vec<String>, Vec<String>) {
     }
 
     (warnings, errors)
+}
+
+/// Apply patch operations to a Routine, returning the modified Routine.
+fn apply_patch(routine: &mut Routine, ops: &[PatchOp]) -> std::result::Result<(), String> {
+    for op in ops {
+        match op {
+            PatchOp::ReplaceStep { step_id, step_yaml } => {
+                let step: crate::parser::Step = serde_yaml::from_str(step_yaml)
+                    .map_err(|e| format!("replace_step '{step_id}': invalid YAML: {e}"))?;
+                let pos = routine
+                    .steps
+                    .iter()
+                    .position(|s| s.id == *step_id)
+                    .ok_or_else(|| format!("replace_step: step '{step_id}' not found"))?;
+                routine.steps[pos] = step;
+            }
+            PatchOp::AddStep { after, step_yaml } => {
+                let step: crate::parser::Step = serde_yaml::from_str(step_yaml)
+                    .map_err(|e| format!("add_step: invalid YAML: {e}"))?;
+                match after {
+                    Some(after_id) => {
+                        let pos = routine
+                            .steps
+                            .iter()
+                            .position(|s| s.id == *after_id)
+                            .ok_or_else(|| {
+                                format!("add_step: after step '{after_id}' not found")
+                            })?;
+                        routine.steps.insert(pos + 1, step);
+                    }
+                    None => {
+                        routine.steps.insert(0, step);
+                    }
+                }
+            }
+            PatchOp::RemoveStep { step_id } => {
+                let pos = routine
+                    .steps
+                    .iter()
+                    .position(|s| s.id == *step_id)
+                    .ok_or_else(|| format!("remove_step: step '{step_id}' not found"))?;
+                routine.steps.remove(pos);
+            }
+            PatchOp::Set { path, value } => {
+                apply_set_field(routine, path, value)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply a `set` operation on a Routine field. Handles known paths directly
+/// to avoid JSON roundtrip (which loses IndexMap insertion order).
+fn apply_set_field(
+    routine: &mut Routine,
+    path: &str,
+    value: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    let str_val = || -> std::result::Result<String, String> {
+        match value {
+            serde_json::Value::String(s) => Ok(s.clone()),
+            other => Ok(other.to_string()),
+        }
+    };
+    fn deser<T: serde::de::DeserializeOwned>(
+        v: &serde_json::Value,
+    ) -> std::result::Result<T, String> {
+        serde_json::from_value(v.clone()).map_err(|e| e.to_string())
+    }
+
+    match path {
+        "name" => routine.name = str_val()?,
+        "description" => routine.description = str_val()?,
+        "strict_mode" => {
+            routine.strict_mode = value
+                .as_bool()
+                .ok_or_else(|| format!("set: expected bool for '{path}'"))?
+        }
+        "output" => routine.output = Some(deser(value)?),
+        "output.value" => {
+            routine
+                .output
+                .get_or_insert_with(|| crate::parser::OutputConfig {
+                    value: String::new(),
+                    format: crate::parser::OutputFormat::default(),
+                    columns: None,
+                })
+                .value = str_val()?
+        }
+        "output.format" => {
+            routine
+                .output
+                .get_or_insert_with(|| crate::parser::OutputConfig {
+                    value: String::new(),
+                    format: crate::parser::OutputFormat::default(),
+                    columns: None,
+                })
+                .format = deser(value)?
+        }
+        "output.columns" => {
+            routine
+                .output
+                .get_or_insert_with(|| crate::parser::OutputConfig {
+                    value: String::new(),
+                    format: crate::parser::OutputFormat::default(),
+                    columns: None,
+                })
+                .columns = deser(value)?
+        }
+        "audit" => routine.audit = deser(value)?,
+        "secrets_env" => routine.secrets_env = deser(value)?,
+        "timeout" => routine.routine_timeout = deser(value)?,
+        _ => return Err(format!("set: unknown path '{path}'")),
+    }
+    Ok(())
+}
+
+/// Compute a human-readable semantic diff between two Routines.
+fn semantic_diff(old: &Routine, new: &Routine) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    // Top-level metadata
+    if old.name != new.name {
+        changes.push(format!("~ name: {} → {}", old.name, new.name));
+    }
+    if old.description != new.description {
+        changes.push(format!(
+            "~ description: {} → {}",
+            old.description, new.description
+        ));
+    }
+    if old.strict_mode != new.strict_mode {
+        changes.push(format!(
+            "~ strict_mode: {} → {}",
+            old.strict_mode, new.strict_mode
+        ));
+    }
+
+    // Output config
+    match (&old.output, &new.output) {
+        (None, Some(cfg)) => changes.push(format!("+ output: {}", cfg.value)),
+        (Some(_), None) => changes.push("- output: removed".to_string()),
+        (Some(o), Some(n)) => {
+            if o.value != n.value {
+                changes.push(format!("~ output.value: {} → {}", o.value, n.value));
+            }
+            if o.format != n.format {
+                changes.push(format!("~ output.format: {:?} → {:?}", o.format, n.format));
+            }
+            if o.columns != n.columns {
+                changes.push(format!(
+                    "~ output.columns: {:?} → {:?}",
+                    o.columns, n.columns
+                ));
+            }
+        }
+        (None, None) => {}
+    }
+
+    // Steps diff: build id → index maps
+    let old_ids: Vec<&str> = old.steps.iter().map(|s| s.id.as_str()).collect();
+    let new_ids: Vec<&str> = new.steps.iter().map(|s| s.id.as_str()).collect();
+
+    // Removed steps
+    for id in &old_ids {
+        if !new_ids.contains(id) {
+            changes.push(format!("- step[{id}]: removed"));
+        }
+    }
+
+    // Added or changed steps
+    for (new_idx, new_step) in new.steps.iter().enumerate() {
+        if let Some(old_idx) = old_ids.iter().position(|id| *id == new_step.id) {
+            // Exists in both — structural comparison via JSON Value
+            let old_val = serde_json::to_value(&old.steps[old_idx]).unwrap_or_default();
+            let new_val = serde_json::to_value(new_step).unwrap_or_default();
+            if old_val != new_val {
+                changes.push(format!("~ step[{}]: modified", new_step.id));
+            }
+            if old_idx != new_idx {
+                changes.push(format!(
+                    "~ step[{}]: moved #{} → #{}",
+                    new_step.id,
+                    old_idx + 1,
+                    new_idx + 1
+                ));
+            }
+        } else {
+            // New step
+            let after = if new_idx > 0 {
+                format!(" (after {})", new.steps[new_idx - 1].id)
+            } else {
+                " (first)".to_string()
+            };
+            changes.push(format!("+ step[{}]: added{after}", new_step.id));
+        }
+    }
+
+    changes
 }
 
 fn err_internal(msg: String) -> ErrorData {
@@ -736,13 +959,11 @@ impl RoutinesMcpServer {
                 }
                 return text_ok(msg);
             }
-            "update" => {
+            action @ ("update" | "diff") => {
+                let is_diff = action == "diff";
                 let name = params
                     .name
-                    .ok_or_else(|| err_params("'name' required for update".into()))?;
-                let yaml_content = params
-                    .yaml_content
-                    .ok_or_else(|| err_params("'yaml_content' required for update".into()))?;
+                    .ok_or_else(|| err_params(format!("'name' required for {action}")))?;
                 let file_path = resolve_routine_path(&name, &routines_dir());
                 if !file_path.exists() {
                     return Err(err_params(format!(
@@ -750,9 +971,45 @@ impl RoutinesMcpServer {
                         file_path.display()
                     )));
                 }
-                let routine = Routine::from_yaml(&yaml_content)
-                    .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
-                let (warnings, errors) = enhanced_validate(&routine);
+                let old_content = std::fs::read_to_string(&file_path)
+                    .map_err(|e| err_internal(format!("Read error: {e}")))?;
+                let old_routine = Routine::from_yaml(&old_content)
+                    .map_err(|e| err_internal(format!("Existing YAML broken: {e}")))?;
+
+                let has_patch = params.patch.is_some();
+                let has_yaml = params.yaml_content.is_some();
+
+                if has_patch && has_yaml {
+                    return Err(err_params(
+                        "'patch' and 'yaml_content' are mutually exclusive".into(),
+                    ));
+                }
+                if !has_patch && !has_yaml {
+                    return Err(err_params(
+                        "'patch' or 'yaml_content' required for update/diff".into(),
+                    ));
+                }
+
+                let (new_routine, new_yaml) = if let Some(patch_ops) = &params.patch {
+                    // Patch mode
+                    let mut routine = old_routine.clone();
+                    apply_patch(&mut routine, patch_ops)
+                        .map_err(|e| err_params(format!("Patch error: {e}")))?;
+                    let yaml = serde_yaml::to_string(&routine)
+                        .map_err(|e| err_internal(format!("Serialize error: {e}")))?;
+                    // Re-parse to validate DAG etc.
+                    let validated = Routine::from_yaml(&yaml)
+                        .map_err(|e| err_params(format!("After patch: {e}")))?;
+                    (validated, yaml)
+                } else {
+                    // Full replace mode
+                    let yaml = params.yaml_content.unwrap();
+                    let routine = Routine::from_yaml(&yaml)
+                        .map_err(|e| err_params(format!("Invalid YAML: {e}")))?;
+                    (routine, yaml)
+                };
+
+                let (warnings, errors) = enhanced_validate(&new_routine);
                 if !errors.is_empty() {
                     return Err(err_params(format!(
                         "Validation errors:\n{}",
@@ -763,9 +1020,33 @@ impl RoutinesMcpServer {
                             .join("\n")
                     )));
                 }
-                std::fs::write(&file_path, &yaml_content)
+
+                let diff = semantic_diff(&old_routine, &new_routine);
+
+                if is_diff {
+                    // Dry-run: return diff without writing
+                    let mut msg = format!("diff {name}:");
+                    if diff.is_empty() {
+                        msg.push_str("\n  (no changes)");
+                    } else {
+                        for d in &diff {
+                            msg.push_str(&format!("\n  {d}"));
+                        }
+                    }
+                    return text_ok(msg);
+                }
+
+                // Write
+                std::fs::write(&file_path, &new_yaml)
                     .map_err(|e| err_internal(format!("Failed to write file: {e}")))?;
+
                 let mut msg = format!("updated {name} → {}", file_path.display());
+                if !diff.is_empty() {
+                    msg.push_str("\nChanges:");
+                    for d in &diff {
+                        msg.push_str(&format!("\n  {d}"));
+                    }
+                }
                 if !warnings.is_empty() {
                     msg.push_str("\nWarnings:");
                     for w in &warnings {
@@ -1183,7 +1464,7 @@ impl RoutinesMcpServer {
             }
             other => {
                 return Err(err_params(format!(
-                    "Unknown action '{other}'. Use: schema, get, create, update, validate, dry_run, test, history, log, run_step, explore, solidify"
+                    "Unknown action '{other}'. Use: schema, get, create, update, diff, validate, dry_run, test, history, log, run_step, explore, solidify"
                 )));
             }
         }

@@ -7,26 +7,30 @@ use serde::{Deserialize, Serialize};
 pub struct Routine {
     pub name: String,
     pub description: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<InputDef>,
     pub steps: Vec<Step>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub strict_mode: bool,
     /// Cleanup steps that always execute after main steps, regardless of success/failure.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub finally: Vec<Step>,
     /// Output configuration: what to output, how to format it, and rendering details.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<OutputConfig>,
     /// Secrets injection into CLI subprocess environment variables.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "SecretsEnv::is_none")]
     pub secrets_env: SecretsEnv,
     /// Maximum execution time for the entire routine in seconds.
-    #[serde(default, rename = "timeout")]
+    #[serde(default, rename = "timeout", skip_serializing_if = "Option::is_none")]
     pub routine_timeout: Option<u64>,
     /// Audit level: full (every step), summary (run + failures only), none (no audit).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "AuditLevel::is_default")]
     pub audit: AuditLevel,
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 /// Audit logging level for a routine.
@@ -42,8 +46,14 @@ pub enum AuditLevel {
     None,
 }
 
+impl AuditLevel {
+    fn is_default(&self) -> bool {
+        *self == AuditLevel::Summary
+    }
+}
+
 /// Secrets injection mode for CLI subprocess environment variables.
-#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum SecretsEnv {
     /// No automatic injection (default, current behavior).
     #[default]
@@ -52,6 +62,25 @@ pub enum SecretsEnv {
     Auto,
     /// Inject only the listed secret names.
     List(Vec<String>),
+}
+
+impl SecretsEnv {
+    fn is_none(&self) -> bool {
+        *self == SecretsEnv::None
+    }
+}
+
+impl serde::Serialize for SecretsEnv {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            SecretsEnv::None => serializer.serialize_str("none"),
+            SecretsEnv::Auto => serializer.serialize_str("auto"),
+            SecretsEnv::List(items) => items.serialize(serializer),
+        }
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for SecretsEnv {
@@ -97,7 +126,7 @@ impl<'de> serde::Deserialize<'de> for SecretsEnv {
 }
 
 /// Structured output configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OutputConfig {
     /// Template expression resolved after all steps complete.
     pub value: String,
@@ -122,17 +151,21 @@ pub enum OutputFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputDef {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub required: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Type constraint for validation before execution.
-    #[serde(default, rename = "type")]
+    #[serde(
+        default,
+        rename = "type",
+        skip_serializing_if = "InputType::is_default"
+    )]
     pub input_type: InputType,
     /// Allowed values when input_type is Enum.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
 }
 
@@ -149,6 +182,12 @@ pub enum InputType {
     Enum,
 }
 
+impl InputType {
+    fn is_default(&self) -> bool {
+        *self == InputType::String
+    }
+}
+
 /// A single execution step with type-safe action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
@@ -157,25 +196,25 @@ pub struct Step {
     #[serde(flatten)]
     pub action: StepAction,
     /// Timeout in seconds. Step is killed and marked FAILED on expiry.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
     /// Condition expression. Step is skipped when condition evaluates to false.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
     /// Error strategy when step fails.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "OnFail::is_default")]
     pub on_fail: OnFail,
     /// Step IDs that must complete before this step starts. Enables parallel execution.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     /// Retry configuration. Step is retried on failure before triggering on_fail.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
     /// Iterate this step over a list. Each iteration injects `{{ item }}` and `{{ item_index }}`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub for_each: Option<ForEach>,
     /// Max concurrent iterations for for_each. Default None (=1, serial). 0 = unlimited.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<u32>,
 }
 
@@ -221,33 +260,33 @@ pub enum BackoffStrategy {
 pub enum StepAction {
     Cli {
         command: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         args: Vec<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         env: HashMap<String, String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         stdin: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
     },
     Http {
         url: String,
-        #[serde(default = "default_method")]
+        #[serde(default = "default_method", skip_serializing_if = "is_default_method")]
         method: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         headers: HashMap<String, String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<String>,
     },
     Routine {
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         inputs: HashMap<String, String>,
     },
     Mcp {
         server: String,
         tool: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         arguments: HashMap<String, serde_json::Value>,
     },
     Write {
@@ -256,27 +295,31 @@ pub enum StepAction {
         /// Content to write (supports template expressions).
         content: String,
         /// Write mode: overwrite (default) or append.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "WriteMode::is_default")]
         mode: WriteMode,
     },
     Transform {
         /// Template expression that resolves to a JSON string.
         input: String,
         /// JSON path to select data from input. If pointing to an array, mapping applies per element.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         select: Option<String>,
         /// Field mapping: output_key → path + filter pipeline. Uses IndexMap to preserve order.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         mapping: Option<indexmap::IndexMap<String, String>>,
         /// Multi-field template: `{{ .field | filter }}` placeholders replaced from input JSON.
         /// Mutually exclusive with mapping. Output is plain text, not JSON.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         template: Option<String>,
     },
 }
 
 fn default_method() -> String {
     "GET".to_string()
+}
+
+fn is_default_method(m: &str) -> bool {
+    m == "GET"
 }
 
 /// Write mode for file output steps.
@@ -288,6 +331,12 @@ pub enum WriteMode {
     Append,
 }
 
+impl WriteMode {
+    fn is_default(&self) -> bool {
+        *self == WriteMode::Overwrite
+    }
+}
+
 /// Error strategy for a step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -295,6 +344,12 @@ pub enum OnFail {
     #[default]
     Stop,
     Continue,
+}
+
+impl OnFail {
+    fn is_default(&self) -> bool {
+        *self == OnFail::Stop
+    }
 }
 
 impl Routine {
