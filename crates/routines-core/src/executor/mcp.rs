@@ -36,6 +36,7 @@ pub(super) fn execute(params: &McpParams, ctx: &Context) -> Result<StepResult> {
                 stderr: format!("MCP server '{}' not found in mcp.json", params.server),
                 execution_time_ms: start.elapsed().as_millis() as u64,
                 diagnostic: None,
+                headers: HashMap::new(),
             });
         }
     };
@@ -123,6 +124,7 @@ pub(super) fn execute(params: &McpParams, ctx: &Context) -> Result<StepResult> {
                 stderr,
                 execution_time_ms: elapsed,
                 diagnostic: None,
+                headers: HashMap::new(),
             })
         }
         Err(err_msg) => Ok(StepResult {
@@ -133,6 +135,7 @@ pub(super) fn execute(params: &McpParams, ctx: &Context) -> Result<StepResult> {
             stderr: err_msg,
             execution_time_ms: elapsed,
             diagnostic: None,
+            headers: HashMap::new(),
         }),
     }
 }

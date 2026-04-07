@@ -65,7 +65,7 @@ pub struct RunRoutineParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MetaParams {
-    /// Action: schema, get, create, validate, dry_run, test, history, log, run_step, explore, solidify
+    /// Action: guide, schema, get, create, validate, dry_run, test, history, log, run_step, explore, solidify
     pub action: String,
     /// Routine name (for get/create/history/run_step/explore) or run_id (for log)
     #[serde(default)]
@@ -103,6 +103,43 @@ pub struct StepMock {
     #[serde(default)]
     pub exit_code: Option<i32>,
 }
+
+const GUIDE: &str = "\
+Routines Agent Guide
+====================
+
+## Running an existing routine
+1. list → find the routine and its required inputs
+2. run(name, inputs) → execute and deliver result
+
+## Creating a new routine
+NEVER write YAML files directly. Always use MCP tools:
+1. meta(action=schema) → learn the YAML DSL and step types
+2. list → browse existing routines for patterns
+3. meta(action=get, name=...) → read a similar routine as template
+4. Understand the user's domain (read source code, API docs, etc.)
+5. meta(action=create, name=..., yaml_content=...) → save routine
+6. meta(action=validate, yaml_content=...) → check for errors
+7. run → execute end-to-end
+
+## Exploring uncertain APIs (auth flows, unknown responses)
+1. meta(action=explore, name=...) → start explore session (returns session_id)
+2. meta(action=run_step, session=..., step_yaml=...) → test one step
+3. Iterate: adjust based on output, test next step
+4. meta(action=solidify, session=...) → freeze into a routine
+
+## Debugging a failed run
+- meta(action=run_step, name=..., step_id=X) → re-run single step
+- meta(action=run_step, ..., mock_context={...}) → test with mocked upstream
+- meta(action=log, name=<run_id>) → inspect audit log
+
+## Key rules
+- Always use meta(action=create), never write files directly
+- Call meta(action=schema) before writing YAML if unfamiliar with DSL
+- Prefer explore/solidify when external API behavior is unknown
+- Step types: cli, http, transform, routine, mcp, write
+- HTTP steps expose response headers via {{ step_id.headers.name }} (lowercase)
+";
 
 const DSL_SCHEMA: &str = "\
 Routine YAML DSL Reference
@@ -211,6 +248,7 @@ Template syntax:
   {{ step_id.stderr }}       — stderr of a previous step (trimmed)
   {{ step_id.exit_code }}    — exit code of a previous step (integer string)
   {{ step_id.stdout_lines }} — stdout split by newline as JSON array (for use with for_each)
+  {{ step_id.headers.NAME }} — HTTP response header value, lowercase name (HTTP steps only)
   {{ item }}                 — current iteration value (inside for_each)
   {{ item_index }}           — current iteration index, 0-based (inside for_each)
   {{ _run.status }}          — run status: SUCCESS or FAILED (available in finally block)
@@ -587,6 +625,9 @@ impl RoutinesMcpServer {
         Parameters(params): Parameters<MetaParams>,
     ) -> Result<CallToolResult, ErrorData> {
         match params.action.as_str() {
+            "guide" => {
+                return text_ok(GUIDE.trim().to_string());
+            }
             "schema" => {
                 return text_ok(DSL_SCHEMA.trim().to_string());
             }
@@ -840,6 +881,7 @@ impl RoutinesMcpServer {
                                         stdout: recorded.stdout.clone(),
                                         stderr: String::new(),
                                         exit_code: Some(0),
+                                        headers: HashMap::new(),
                                     },
                                 );
                             }
@@ -855,6 +897,7 @@ impl RoutinesMcpServer {
                                     stdout: mock.stdout.unwrap_or_default(),
                                     stderr: mock.stderr.unwrap_or_default(),
                                     exit_code: mock.exit_code,
+                                    headers: HashMap::new(),
                                 },
                             );
                         }
@@ -962,6 +1005,7 @@ impl RoutinesMcpServer {
                                 stdout: mock.stdout.unwrap_or_default(),
                                 stderr: mock.stderr.unwrap_or_default(),
                                 exit_code: mock.exit_code,
+                                headers: HashMap::new(),
                             },
                         );
                     }
@@ -1584,8 +1628,9 @@ impl ServerHandler for RoutinesMcpServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("routines", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Routines: workflow engine. list → discover, \
-             run → execute, meta → schema/get/create/validate/dry_run/test/history/log/run_step."
+            "Routines: deterministic workflow engine. \
+             Three tools: list (discover routines), run (execute), meta (build/inspect/debug). \
+             Call meta(action=guide) for detailed usage when you need to create, explore, or debug routines."
                 .into(),
         );
         info

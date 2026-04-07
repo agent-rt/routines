@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::context::Context;
@@ -50,6 +51,7 @@ pub(super) fn execute(
                         suggestion: "disable strict_mode or use a safe output path".to_string(),
                         fix_hint: None,
                     }),
+                    headers: HashMap::new(),
                 });
             }
         }
@@ -69,6 +71,7 @@ pub(super) fn execute(
                         ),
                         execution_time_ms: start.elapsed().as_millis() as u64,
                         diagnostic: None,
+                        headers: HashMap::new(),
                     });
                 }
             }
@@ -88,6 +91,7 @@ pub(super) fn execute(
             stderr: format!("failed to create directory: {e}"),
             execution_time_ms: start.elapsed().as_millis() as u64,
             diagnostic: None,
+            headers: HashMap::new(),
         });
     }
 
@@ -121,6 +125,7 @@ pub(super) fn execute(
                 stderr: format!("{mode_str} {bytes} bytes"),
                 execution_time_ms: elapsed,
                 diagnostic: None,
+                headers: HashMap::new(),
             })
         }
         Err(e) => Ok(StepResult {
@@ -131,6 +136,7 @@ pub(super) fn execute(
             stderr: format!("write failed: {e}"),
             execution_time_ms: elapsed,
             diagnostic: None,
+            headers: HashMap::new(),
         }),
     }
 }

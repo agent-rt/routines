@@ -33,6 +33,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
             stderr: format!("Max routine nesting depth ({MAX_DEPTH}) exceeded"),
             execution_time_ms: 0,
             diagnostic: None,
+            headers: HashMap::new(),
         });
     }
 
@@ -51,6 +52,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
             ),
             execution_time_ms: 0,
             diagnostic: None,
+            headers: HashMap::new(),
         });
     }
 
@@ -65,6 +67,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
                 stderr: format!("Failed to parse sub-routine '{}': {e}", params.name),
                 execution_time_ms: 0,
                 diagnostic: None,
+                headers: HashMap::new(),
             });
         }
     };
@@ -99,6 +102,7 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
             stderr: format!("Sub-routine timed out after {t}s"),
             execution_time_ms: elapsed,
             diagnostic: None,
+            headers: HashMap::new(),
         });
     }
 
@@ -131,5 +135,6 @@ pub(super) fn execute(params: &RoutineParams, ctx: &Context) -> Result<StepResul
         stderr,
         execution_time_ms: elapsed,
         diagnostic: None,
+        headers: HashMap::new(),
     })
 }

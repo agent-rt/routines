@@ -37,6 +37,9 @@ pub struct StepOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
+    /// HTTP response headers (only populated by HTTP steps).
+    #[allow(dead_code)]
+    pub headers: HashMap<String, String>,
 }
 
 impl Context {
@@ -194,6 +197,17 @@ impl Context {
                             output.stdout.lines().filter(|l| !l.is_empty()).collect();
                         Ok(serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_string()))
                     }
+                    s if s.starts_with("headers.") => {
+                        let header_name = &s["headers.".len()..];
+                        output
+                            .headers
+                            .get(header_name)
+                            .cloned()
+                            .ok_or_else(|| RoutineError::UndefinedVariable {
+                                step_id: current_step_id.to_string(),
+                                key: key.to_string(),
+                            })
+                    }
                     _ => Err(RoutineError::UndefinedVariable {
                         step_id: current_step_id.to_string(),
                         key: key.to_string(),
@@ -237,6 +251,7 @@ mod tests {
                 stdout: "build-ok".to_string(),
                 stderr: String::new(),
                 exit_code: Some(0),
+                headers: HashMap::new(),
             },
         );
         let result = ctx.resolve("result: {{ build.stdout }}", "notify").unwrap();
@@ -266,6 +281,7 @@ mod tests {
                 stdout: "alpha\nbeta\ngamma\n".to_string(),
                 stderr: String::new(),
                 exit_code: Some(0),
+                headers: HashMap::new(),
             },
         );
         let result = ctx.resolve("{{ list.stdout_lines }}", "test").unwrap();
@@ -300,5 +316,53 @@ mod tests {
         let ctx = Context::new(HashMap::new(), HashMap::new());
         let err = ctx.resolve("{{ _run.status }}", "test").unwrap_err();
         assert!(err.to_string().contains("_run.status"));
+    }
+
+    #[test]
+    fn resolve_headers() {
+        let mut ctx = Context::new(HashMap::new(), HashMap::new());
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "set-cookie".to_string(),
+            "token=abc123; sid=xyz".to_string(),
+        );
+        ctx.add_step_output(
+            "auth".to_string(),
+            StepOutput {
+                stdout: "body".to_string(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                headers,
+            },
+        );
+        assert_eq!(
+            ctx.resolve("{{ auth.headers.content-type }}", "test")
+                .unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            ctx.resolve("{{ auth.headers.set-cookie }}", "test")
+                .unwrap(),
+            "token=abc123; sid=xyz"
+        );
+    }
+
+    #[test]
+    fn headers_missing_key_errors() {
+        let mut ctx = Context::new(HashMap::new(), HashMap::new());
+        ctx.add_step_output(
+            "req".to_string(),
+            StepOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                headers: HashMap::new(),
+            },
+        );
+        let err = ctx
+            .resolve("{{ req.headers.x-missing }}", "test")
+            .unwrap_err();
+        assert!(err.to_string().contains("req.headers.x-missing"));
     }
 }

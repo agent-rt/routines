@@ -86,6 +86,7 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
                     suggestion: format!("install '{resolved_command}' or check PATH"),
                     fix_hint: None,
                 }),
+                headers: HashMap::new(),
             });
         }
         Err(e) => return Err(RoutineError::Io(e)),
@@ -122,6 +123,7 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
                                 ),
                                 fix_hint: None,
                             }),
+                            headers: HashMap::new(),
                         });
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -189,5 +191,6 @@ pub(super) fn execute(params: &CliParams, ctx: &Context) -> Result<StepResult> {
         stderr,
         execution_time_ms: elapsed,
         diagnostic,
+        headers: HashMap::new(),
     })
 }

@@ -45,90 +45,122 @@ pub(super) fn execute(
     };
 
     // Build and send request
-    let send_result = (|| -> std::result::Result<(u16, String), ureq::Error> {
-        let method_upper = method.to_uppercase();
+    let send_result =
+        (|| -> std::result::Result<(u16, String, HashMap<String, String>), ureq::Error> {
+            let method_upper = method.to_uppercase();
 
-        macro_rules! apply_headers {
-            ($builder:expr) => {{
-                let mut req = $builder;
-                for (k, v) in &resolved_headers {
-                    req = req.header(k.as_str(), v.as_str());
+            macro_rules! apply_headers {
+                ($builder:expr) => {{
+                    let mut req = $builder;
+                    for (k, v) in &resolved_headers {
+                        req = req.header(k.as_str(), v.as_str());
+                    }
+                    req
+                }};
+            }
+
+            /// Extract response headers into a HashMap.
+            /// Multi-value headers (e.g. multiple Set-Cookie) are joined with "; ".
+            fn collect_response_headers(
+                resp: &ureq::http::Response<ureq::Body>,
+            ) -> HashMap<String, String> {
+                let mut map: HashMap<String, String> = HashMap::new();
+                for (name, value) in resp.headers().iter() {
+                    let key = name.as_str().to_lowercase();
+                    let val = value.to_str().unwrap_or_default().to_string();
+                    map.entry(key)
+                        .and_modify(|existing| {
+                            existing.push_str("; ");
+                            existing.push_str(&val);
+                        })
+                        .or_insert(val);
                 }
-                req
-            }};
-        }
+                map
+            }
 
-        let (status_code, body) = match method_upper.as_str() {
-            "POST" => {
-                let req = apply_headers!(agent.post(&url));
-                let mut resp = if let Some(b) = &body_data {
-                    req.send(b.as_bytes())?
-                } else {
-                    req.send_empty()?
-                };
-                (
-                    resp.status(),
-                    resp.body_mut().read_to_string().unwrap_or_default(),
-                )
-            }
-            "PUT" => {
-                let req = apply_headers!(agent.put(&url));
-                let mut resp = if let Some(b) = &body_data {
-                    req.send(b.as_bytes())?
-                } else {
-                    req.send_empty()?
-                };
-                (
-                    resp.status(),
-                    resp.body_mut().read_to_string().unwrap_or_default(),
-                )
-            }
-            "PATCH" => {
-                let req = apply_headers!(agent.patch(&url));
-                let mut resp = if let Some(b) = &body_data {
-                    req.send(b.as_bytes())?
-                } else {
-                    req.send_empty()?
-                };
-                (
-                    resp.status(),
-                    resp.body_mut().read_to_string().unwrap_or_default(),
-                )
-            }
-            "DELETE" => {
-                let req = apply_headers!(agent.delete(&url));
-                let mut resp = req.call()?;
-                (
-                    resp.status(),
-                    resp.body_mut().read_to_string().unwrap_or_default(),
-                )
-            }
-            "HEAD" => {
-                let req = apply_headers!(agent.head(&url));
-                let mut resp = req.call()?;
-                (
-                    resp.status(),
-                    resp.body_mut().read_to_string().unwrap_or_default(),
-                )
-            }
-            _ => {
-                // Default to GET
-                let req = apply_headers!(agent.get(&url));
-                let mut resp = req.call()?;
-                (
-                    resp.status(),
-                    resp.body_mut().read_to_string().unwrap_or_default(),
-                )
-            }
-        };
+            let (status_code, body, resp_headers) = match method_upper.as_str() {
+                "POST" => {
+                    let req = apply_headers!(agent.post(&url));
+                    let mut resp = if let Some(b) = &body_data {
+                        req.send(b.as_bytes())?
+                    } else {
+                        req.send_empty()?
+                    };
+                    let headers = collect_response_headers(&resp);
+                    (
+                        resp.status(),
+                        resp.body_mut().read_to_string().unwrap_or_default(),
+                        headers,
+                    )
+                }
+                "PUT" => {
+                    let req = apply_headers!(agent.put(&url));
+                    let mut resp = if let Some(b) = &body_data {
+                        req.send(b.as_bytes())?
+                    } else {
+                        req.send_empty()?
+                    };
+                    let headers = collect_response_headers(&resp);
+                    (
+                        resp.status(),
+                        resp.body_mut().read_to_string().unwrap_or_default(),
+                        headers,
+                    )
+                }
+                "PATCH" => {
+                    let req = apply_headers!(agent.patch(&url));
+                    let mut resp = if let Some(b) = &body_data {
+                        req.send(b.as_bytes())?
+                    } else {
+                        req.send_empty()?
+                    };
+                    let headers = collect_response_headers(&resp);
+                    (
+                        resp.status(),
+                        resp.body_mut().read_to_string().unwrap_or_default(),
+                        headers,
+                    )
+                }
+                "DELETE" => {
+                    let req = apply_headers!(agent.delete(&url));
+                    let mut resp = req.call()?;
+                    let headers = collect_response_headers(&resp);
+                    (
+                        resp.status(),
+                        resp.body_mut().read_to_string().unwrap_or_default(),
+                        headers,
+                    )
+                }
+                "HEAD" => {
+                    let req = apply_headers!(agent.head(&url));
+                    let mut resp = req.call()?;
+                    let headers = collect_response_headers(&resp);
+                    (
+                        resp.status(),
+                        resp.body_mut().read_to_string().unwrap_or_default(),
+                        headers,
+                    )
+                }
+                _ => {
+                    // Default to GET
+                    let req = apply_headers!(agent.get(&url));
+                    let mut resp = req.call()?;
+                    let headers = collect_response_headers(&resp);
+                    (
+                        resp.status(),
+                        resp.body_mut().read_to_string().unwrap_or_default(),
+                        headers,
+                    )
+                }
+            };
 
-        Ok((u16::from(status_code), body))
-    })();
+            Ok((u16::from(status_code), body, resp_headers))
+        })();
 
     let elapsed = start.elapsed().as_millis() as u64;
 
     match send_result {
-        Ok((status_code, body)) => {
+        Ok((status_code, body, resp_headers)) => {
             let success = (200..300).contains(&(status_code as i32));
             let status_text = format!("HTTP {status_code} {method} {url}");
 
@@ -155,6 +187,7 @@ pub(super) fn execute(
                 stderr: status_text,
                 execution_time_ms: elapsed,
                 diagnostic,
+                headers: resp_headers,
             })
         }
         Err(e) => {
@@ -186,6 +219,7 @@ pub(super) fn execute(
                     suggestion,
                     fix_hint: None,
                 }),
+                headers: HashMap::new(),
             })
         }
     }

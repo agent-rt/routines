@@ -61,6 +61,8 @@ pub struct StepResult {
     pub stderr: String,
     pub execution_time_ms: u64,
     pub diagnostic: Option<Diagnostic>,
+    /// HTTP response headers (only populated by HTTP steps).
+    pub headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -333,6 +335,7 @@ fn execute_step(
                 stderr: String::new(),
                 execution_time_ms: 0,
                 diagnostic: None,
+                headers: HashMap::new(),
             });
         }
     }
@@ -353,6 +356,7 @@ fn execute_step(
             stderr: mock.stderr.clone().unwrap_or_default(),
             execution_time_ms: 0,
             diagnostic: None,
+            headers: HashMap::new(),
         });
     }
 
@@ -485,6 +489,7 @@ fn execute_step(
                             stderr: String::new(),
                             execution_time_ms: start.elapsed().as_millis() as u64,
                             diagnostic: None,
+                            headers: HashMap::new(),
                         });
                     }
                     Err(e) => {
@@ -503,6 +508,7 @@ fn execute_step(
                                 suggestion: format!("template rendering failed: {e}"),
                                 fix_hint: None,
                             }),
+                            headers: HashMap::new(),
                         });
                     }
                 }
@@ -537,6 +543,7 @@ fn execute_step(
                         stderr: String::new(),
                         execution_time_ms: start.elapsed().as_millis() as u64,
                         diagnostic: None,
+                        headers: HashMap::new(),
                     })
                 }
                 Err(e) => {
@@ -574,6 +581,7 @@ fn execute_step(
                             suggestion,
                             fix_hint: None,
                         }),
+                        headers: HashMap::new(),
                     })
                 }
             }
@@ -704,6 +712,7 @@ fn execute_step_with_foreach(
             stderr: "for_each: empty list".to_string(),
             execution_time_ms: 0,
             diagnostic: None,
+            headers: HashMap::new(),
         }]);
     }
 
@@ -787,6 +796,7 @@ fn execute_step_with_foreach(
                                 stderr: e.to_string(),
                                 execution_time_ms: 0,
                                 diagnostic: None,
+                                headers: HashMap::new(),
                             },
                         };
                         sr.step_id = format!("{}[{}]", step.id, index);
@@ -836,6 +846,7 @@ fn execute_step_with_foreach(
                 stdout: aggregated,
                 stderr: last_stderr,
                 exit_code: last_exit,
+                headers: HashMap::new(),
             },
         );
     }
@@ -889,6 +900,7 @@ fn run_finally(
                             stdout: result.stdout.trim().to_string(),
                             stderr: result.stderr.trim().to_string(),
                             exit_code: result.exit_code,
+                            headers: result.headers.clone(),
                         },
                     );
                 }
@@ -904,6 +916,7 @@ fn run_finally(
                     stderr: e.to_string(),
                     execution_time_ms: 0,
                     diagnostic: None,
+                    headers: HashMap::new(),
                 });
             }
         }
@@ -938,6 +951,7 @@ fn run_sequential(
                 ),
                 execution_time_ms: 0,
                 diagnostic: None,
+                headers: HashMap::new(),
             });
             let run_status = RunStatus::Failed;
             run_finally(
@@ -974,6 +988,7 @@ fn run_sequential(
                     stdout: result.stdout.trim().to_string(),
                     stderr: result.stderr.trim().to_string(),
                     exit_code: result.exit_code,
+                    headers: result.headers.clone(),
                 },
             );
         }
@@ -1137,6 +1152,7 @@ fn run_dag(
                             stderr: "Skipped due to upstream failure".to_string(),
                             execution_time_ms: 0,
                             diagnostic: None,
+                            headers: HashMap::new(),
                         }],
                     );
                     comp.insert(step_id);
@@ -1173,6 +1189,7 @@ fn run_dag(
                             stderr: e.to_string(),
                             execution_time_ms: 0,
                             diagnostic: None,
+                            headers: HashMap::new(),
                         }],
                     };
 
@@ -1191,6 +1208,7 @@ fn run_dag(
                                         stdout: result.stdout.trim().to_string(),
                                         stderr: result.stderr.trim().to_string(),
                                         exit_code: result.exit_code,
+                                        headers: result.headers.clone(),
                                     },
                                 );
                             }
@@ -1283,6 +1301,7 @@ fn run_dag(
                 stderr: "Skipped due to upstream failure".to_string(),
                 execution_time_ms: 0,
                 diagnostic: None,
+                headers: HashMap::new(),
             });
         }
     }
