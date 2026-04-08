@@ -175,6 +175,21 @@ pub(super) fn execute(
                 None
             };
 
+            let stderr = if success {
+                status_text
+            } else {
+                let body_preview = if body.len() > 512 {
+                    format!("{}...(truncated)", &body[..512])
+                } else {
+                    body.clone()
+                };
+                if body_preview.is_empty() {
+                    status_text
+                } else {
+                    format!("{status_text}\n{body_preview}")
+                }
+            };
+
             Ok(StepResult {
                 step_id: step_id.to_string(),
                 status: if success {
@@ -184,7 +199,7 @@ pub(super) fn execute(
                 },
                 exit_code: Some(if success { 0 } else { 1 }),
                 stdout: body,
-                stderr: status_text,
+                stderr,
                 execution_time_ms: elapsed,
                 diagnostic,
                 headers: resp_headers,
@@ -262,6 +277,11 @@ fn http_diagnostic(
         404 => (
             DiagnosticType::HttpClientError,
             "not found — verify URL path and resource existence".to_string(),
+            None,
+        ),
+        410 => (
+            DiagnosticType::HttpClientError,
+            "endpoint returned 410 Gone — URL may be deprecated, check API docs for replacement".to_string(),
             None,
         ),
         429 => (

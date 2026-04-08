@@ -524,10 +524,21 @@ fn apply_filter(value: &Value, filter: &str) -> Result<Value> {
             Ok(Value::String(template.replace("{}", &s)))
         }
 
-        _ => Err(RoutineError::Transform {
-            step_id: String::new(),
-            message: format!("unknown filter: {name}"),
-        }),
+        _ => {
+            const AVAILABLE: &[&str] = &[
+                "default", "to_int", "to_float", "slice", "split", "join",
+                "replace", "math", "round", "floor", "ceil", "take",
+                "ceil_div", "range", "duration_fmt", "fmt",
+            ];
+            Err(RoutineError::Transform {
+                step_id: String::new(),
+                message: format!(
+                    "unknown filter '{}'. Available: {}",
+                    name,
+                    AVAILABLE.join(", ")
+                ),
+            })
+        }
     }
 }
 
@@ -855,6 +866,10 @@ mod tests {
         mapping.insert("v".to_string(), ".a | nonexistent".to_string());
         let result = apply(&input, None, Some(&mapping));
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown filter 'nonexistent'"), "got: {err}");
+        assert!(err.contains("Available:"), "should list available filters, got: {err}");
+        assert!(err.contains("slice"), "should include 'slice' in available list, got: {err}");
     }
 
     #[test]

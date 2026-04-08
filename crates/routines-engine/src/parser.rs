@@ -126,7 +126,10 @@ impl<'de> serde::Deserialize<'de> for SecretsEnv {
 }
 
 /// Structured output configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// Supports string shorthand: `output: "{{ step.stdout }}"` is equivalent to
+/// `output: { value: "{{ step.stdout }}" }`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct OutputConfig {
     /// Template expression resolved after all steps complete.
     pub value: String,
@@ -136,6 +139,55 @@ pub struct OutputConfig {
     /// Explicit column order and selection (only meaningful for table format).
     #[serde(default)]
     pub columns: Option<Vec<String>>,
+}
+
+impl<'de> serde::Deserialize<'de> for OutputConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        #[derive(Deserialize)]
+        struct OutputConfigFull {
+            value: String,
+            #[serde(default)]
+            format: OutputFormat,
+            #[serde(default)]
+            columns: Option<Vec<String>>,
+        }
+
+        struct OutputConfigVisitor;
+
+        impl<'de> de::Visitor<'de> for OutputConfigVisitor {
+            type Value = OutputConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string or an OutputConfig object")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<OutputConfig, E> {
+                Ok(OutputConfig {
+                    value: v.to_string(),
+                    format: OutputFormat::default(),
+                    columns: None,
+                })
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(self, map: M) -> Result<OutputConfig, M::Error> {
+                let full = OutputConfigFull::deserialize(
+                    de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(OutputConfig {
+                    value: full.value,
+                    format: full.format,
+                    columns: full.columns,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(OutputConfigVisitor)
+    }
 }
 
 /// Output format for CLI rendering.
@@ -1244,5 +1296,50 @@ steps:
         .unwrap();
 
         assert_eq!(routine.secrets_env, SecretsEnv::None);
+    }
+
+    #[test]
+    fn output_string_shorthand() {
+        let routine = Routine::from_yaml(
+            r#"
+name: output_shorthand
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+output: "{{ run.stdout }}"
+"#,
+        )
+        .unwrap();
+
+        let output = routine.output.unwrap();
+        assert_eq!(output.value, "{{ run.stdout }}");
+        assert_eq!(output.format, OutputFormat::Plain);
+        assert!(output.columns.is_none());
+    }
+
+    #[test]
+    fn output_full_struct() {
+        let routine = Routine::from_yaml(
+            r#"
+name: output_full
+description: test
+steps:
+  - id: run
+    type: cli
+    command: echo
+output:
+  value: "{{ run.stdout }}"
+  format: table
+  columns: [a, b]
+"#,
+        )
+        .unwrap();
+
+        let output = routine.output.unwrap();
+        assert_eq!(output.value, "{{ run.stdout }}");
+        assert_eq!(output.format, OutputFormat::Table);
+        assert_eq!(output.columns, Some(vec!["a".to_string(), "b".to_string()]));
     }
 }

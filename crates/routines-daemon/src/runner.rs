@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use routines_engine::executor::{self, RunResult, RunStatus};
-use routines_engine::parser::{Routine, SecretsEnv};
+use routines_engine::parser::Routine;
 use routines_engine::secrets;
 use routines_protocol::types::*;
 
@@ -114,19 +114,8 @@ async fn emit_run_completed(
 
 fn load_secrets(
     routines_dir: &std::path::Path,
-    routine: &Routine,
+    _routine: &Routine,
 ) -> HashMap<String, String> {
     let env_path = routines_dir.join(".env");
-    let all_secrets = secrets::load_secrets(&env_path);
-
-    match &routine.secrets_env {
-        SecretsEnv::None => HashMap::new(),
-        SecretsEnv::Auto => all_secrets,
-        SecretsEnv::List(names) => {
-            all_secrets
-                .into_iter()
-                .filter(|(k, _)| names.contains(k))
-                .collect()
-        }
-    }
+    secrets::load_secrets(&env_path)
 }
